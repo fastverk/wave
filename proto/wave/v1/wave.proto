@@ -1,0 +1,168 @@
+syntax = "proto3";
+
+// Durable wave state.
+//
+// A *wave* propagates a dependency-version bump through a graph of separate
+// repositories. This file is the persisted shape: the wave, each repo's
+// per-item progress through the cascade state machine, and the per-transition
+// event the tracing projector reads. It is the on-disk store's schema (encoded
+// with prost) and the interchange between the engine, the CLI/daemon, and the
+// trace exporter — so it is a proto by convention (DTOs are protos).
+
+package wave.v1;
+
+// Wave owns its store schema rather than serializing the forge crate's wire
+// types — so RepoRef/ChangeRef are re-declared here (mirroring forge.v1's
+// shape). wave-core converts to/from the forge runtime types at the forge edge.
+// This keeps wave's persisted format decoupled from the forge dependency.
+
+// A repository on a forge. `forge` carries forge.v1.Forge's enum value;
+// `owner` is the org / group path; `name` is the repo/project slug.
+message RepoRef {
+  int32 forge = 1;
+  string host = 2;
+  string owner = 3;
+  string name = 4;
+}
+
+// A change request (GitHub PR / GitLab MR).
+message ChangeRef {
+  uint64 number = 1;
+  string url = 2;
+  string branch = 3;
+}
+
+// One repo's progress through the cascade. The happy path is
+// PENDING → MR_OPEN → CI_RUNNING → CI_GREEN → MERGING → MERGED → PUBLISHED;
+// SKIPPED (nothing to bump) and FAILED (CI/conflict/forge error) are terminal
+// off-ramps.
+enum WaveItemState {
+  WAVE_ITEM_STATE_UNSPECIFIED = 0;
+  // Not yet acted on — some upstream module it consumes hasn't published yet.
+  WAVE_ITEM_STATE_PENDING = 1;
+  // Bump change (PR/MR) opened, auto-merge enabled.
+  WAVE_ITEM_STATE_MR_OPEN = 2;
+  WAVE_ITEM_STATE_CI_RUNNING = 3;
+  WAVE_ITEM_STATE_CI_GREEN = 4;
+  WAVE_ITEM_STATE_MERGING = 5;
+  // Change merged; awaiting this repo's own release/publish.
+  WAVE_ITEM_STATE_MERGED = 6;
+  // Released a new version (or terminal success for an app that publishes
+  // nothing).
+  WAVE_ITEM_STATE_PUBLISHED = 7;
+  // Every upstream constraint already admits the target — no change needed.
+  WAVE_ITEM_STATE_SKIPPED = 8;
+  // CI failed, a version conflict, or a forge error.
+  WAVE_ITEM_STATE_FAILED = 9;
+}
+
+enum WaveState {
+  WAVE_STATE_UNSPECIFIED = 0;
+  WAVE_STATE_PROPOSED = 1;
+  WAVE_STATE_OPEN = 2;
+  WAVE_STATE_MERGING = 3;
+  WAVE_STATE_COMPLETED = 4;
+  WAVE_STATE_ABORTED = 5;
+}
+
+message WaveItem {
+  RepoRef repo = 1;
+  // The module/package this repo publishes (empty = an app, publishes nothing).
+  string published_module = 2;
+  // The manifest this repo's bump rewrites (e.g. "MODULE.bazel",
+  // "package.json").
+  string manifest_path = 3;
+  // Longest-path depth from the root bump (1 = direct consumer of the root).
+  uint32 tier = 4;
+  // The wave-participating upstream modules this repo consumes.
+  repeated string upstream_modules = 5;
+  WaveItemState state = 6;
+  // The wave branch on this repo (set when the bump is opened).
+  string branch = 7;
+  // The opened change (PR/MR), once open.
+  ChangeRef change = 8;
+  // Resolved target version per upstream module — filled in as each upstream
+  // publishes (for the root module it is the wave's target_version).
+  map<string, string> upstream_targets = 9;
+  // This repo's own published version BEFORE the wave — the baseline that
+  // publish-detection compares against to know the release landed.
+  string baseline_version = 10;
+  // The version this repo published as part of the wave (empty until PUBLISHED).
+  string published_version = 11;
+  // Last error, when FAILED.
+  string error = 12;
+  // RFC 3339.
+  string updated_at = 13;
+}
+
+message Wave {
+  string id = 1;
+  string root_module = 2;
+  RepoRef root_repo = 3;
+  string target_version = 4;
+  WaveState state = 5;
+  // Affected repos in dependency order (ascending tier).
+  repeated WaveItem items = 6;
+  // Repo keys that formed a dependency cycle and couldn't be ordered.
+  repeated string cycle = 7;
+  // Force a bump even where a caret/range already admits the target (advance a
+  // pinned lockfile floor).
+  bool force_bump_satisfied = 8;
+  // RFC 3339.
+  string created_at = 9;
+  string completed_at = 10;
+}
+
+// A single state transition — the durable unit the tracing projector turns into
+// a span. Appended by the engine via the WaveObserver seam.
+message WaveEvent {
+  string wave_id = 1;
+  // repo_key of the affected item; empty for wave-level events.
+  string item_key = 2;
+  WaveItemState from_state = 3;
+  WaveItemState to_state = 4;
+  // Optional detail: change URL, error text, or the published version.
+  string detail = 5;
+  // RFC 3339.
+  string at = 6;
+}
+
+// The on-disk store: every wave with its latest state.
+message WaveStore {
+  uint32 schema_version = 1;
+  repeated Wave waves = 2;
+}
+
+// ── tracing ───────────────────────────────────────────────────────────
+//
+// A wave through the DAG *is* a distributed trace: the root bump is the root
+// span; each downstream bump is a child span parented by the publish that
+// triggered it. Spans are reconstructed from the durable WaveEvent log + the
+// wave's items, so re-projection is idempotent across a wave's minutes-to-days
+// life (a `wave` invocation is a resuming CLI/daemon, never a held-open process).
+
+// One repo's span in a wave trace.
+message BumpSpan {
+  string item_key = 1;          // repo_key
+  RepoRef repo = 2;
+  uint32 tier = 3;
+  WaveItemState final_state = 4;
+  // RFC 3339. `ended_at` empty while still in flight.
+  string started_at = 5;
+  string ended_at = 6;
+  int64 duration_ms = 7;        // 0 while in flight
+  string change_url = 8;
+  string published_version = 9;
+}
+
+// A reconstructed wave trace: one span per repo, ordered by tier then start.
+message WaveTrace {
+  string wave_id = 1;
+  string root_module = 2;
+  string target_version = 3;
+  WaveState state = 4;
+  string started_at = 5;
+  string ended_at = 6;
+  int64 duration_ms = 7;
+  repeated BumpSpan spans = 8;
+}

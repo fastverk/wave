@@ -1,0 +1,11 @@
+# fastverk/wave — cross-repo dependency-cascade engine + CLI.
+#
+# Two crates: `wave-core` (the reusable engine lib + the wave proto) and `wave`
+# (the CLI). Both build with cargo (against a checked-out sibling ../forge) and
+# with Bazel (forge via the @forge module).
+[workspace]
+resolver = "2"
+members = [
+    "wave-core",
+    "wave",
+]

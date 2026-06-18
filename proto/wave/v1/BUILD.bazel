@@ -1,0 +1,4 @@
+package(default_visibility = ["//visibility:public"])
+
+# Compiled by wave-core's build.rs (prost-build); exported as a data dep.
+exports_files(["wave.proto"])

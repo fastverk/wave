@@ -1,0 +1,82 @@
+# wave — cross-repo dependency-cascade engine + CLI.
+#
+# An upstream publishes a new version; wave opens version-bump changes in every
+# downstream repo, auto-merges them on green, and cascades the bump through the
+# dependency DAG in tier order.
+#
+# The forge dependency comes via the `forge` module (@forge//:forge), NOT the
+# crate_universe — so `crate` uses from_specs (third-party crates only) rather
+# than from_cargo, which would otherwise try to double-manage forge.
+module(
+    name = "wave",
+    version = "0.0.1",
+)
+
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "rules_rust", version = "0.70.0")
+bazel_dep(name = "protobuf", version = "33.4")
+bazel_dep(name = "forge", version = "0.0.1")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    versions = ["1.95.0"],
+)
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
+# Third-party crates only (forge is a module dep, above). Hand-listed via
+# from_specs so the crate_universe is independent of the Cargo.toml's
+# fastverk-forge path dep (which is cargo/IDE-only).
+crate = use_extension(
+    "@rules_rust//crate_universe:extension.bzl",
+    "crate",
+    isolate = True,
+)
+crate.spec(package = "anyhow", version = "1.0")
+crate.spec(package = "async-trait", version = "0.1")
+crate.spec(package = "serde", version = "1.0", features = ["derive"])
+crate.spec(package = "serde_json", version = "1.0")
+crate.spec(package = "semver", version = "1")
+crate.spec(package = "regex", version = "1")
+crate.spec(package = "tracing", version = "0.1")
+crate.spec(
+    package = "tracing-subscriber",
+    version = "0.3",
+    features = ["env-filter"],
+)
+crate.spec(
+    package = "tokio",
+    version = "1.40",
+    features = ["full"],
+)
+crate.spec(package = "prost", version = "0.13")
+crate.spec(
+    package = "chrono",
+    version = "0.4",
+    features = ["serde"],
+)
+crate.spec(
+    package = "clap",
+    version = "4.5",
+    features = ["derive"],
+)
+crate.spec(
+    package = "reqwest",
+    version = "0.12",
+    default_features = False,
+    features = [
+        "json",
+        "rustls-tls",
+    ],
+)
+crate.spec(package = "urlencoding", version = "2")
+crate.spec(package = "tempfile", version = "3")
+crate.spec(package = "prost-build", version = "0.13")
+crate.from_specs(name = "crates")
+use_repo(crate, "crates")
+
+# Dev-only.
+bazel_dep(name = "rules_shell", version = "0.6.1", dev_dependency = True)
+bazel_dep(name = "stardoc", version = "0.7.2", dev_dependency = True)

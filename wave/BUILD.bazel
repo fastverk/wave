@@ -1,0 +1,31 @@
+"""wave — the cross-repo dependency-cascade CLI."""
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_binary(
+    name = "wave",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        "//wave-core:wave_core",
+        "@crates//:anyhow",
+        "@crates//:clap",
+        "@crates//:reqwest",
+        "@crates//:serde",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:tracing-subscriber",
+        "@crates//:urlencoding",
+        "@forge//:forge",
+    ],
+)
+
+rust_test(
+    name = "wave_test",
+    crate = ":wave",
+    edition = "2021",
+    # dev-only: the enumerate test's in-memory Forge mock.
+    proc_macro_deps = ["@crates//:async-trait"],
+)
