@@ -9,7 +9,7 @@
 # than from_cargo, which would otherwise try to double-manage forge.
 module(
     name = "wave",
-    version = "0.0.1",
+    version = "0.1.0",
 )
 
 bazel_dep(name = "platforms", version = "1.0.0")
@@ -111,6 +111,33 @@ crate.spec(
 )
 crate.from_specs(name = "crates")
 use_repo(crate, "crates")
+
+# ─── OCI image (//wave:image) ──────────────────────────────────────
+# Bundle the wave binary into a distroless/cc image for the helm
+# CronJob (deploy/helm/wave). distroless/cc carries glibc + ca-certs,
+# nothing else. Built + pushed from linux CI (the binary is built for
+# the host platform; EKS is linux/amd64). aspect_bazel_lib is pinned to
+# match the rules_oci 2.2.6 expectation.
+bazel_dep(name = "rules_oci", version = "2.2.6")
+bazel_dep(name = "rules_pkg", version = "1.0.1")
+bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
+
+oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+oci.pull(
+    name = "distroless_cc",
+    digest = "sha256:6714977f9f02632c31377650c15d89a7efaebf43bab0f37c712c30fc01edb973",
+    image = "gcr.io/distroless/cc-debian12",
+    platforms = [
+        "linux/amd64",
+        "linux/arm64/v8",
+    ],
+)
+use_repo(
+    oci,
+    "distroless_cc",
+    "distroless_cc_linux_amd64",
+    "distroless_cc_linux_arm64_v8",
+)
 
 # Dev-only.
 bazel_dep(name = "rules_shell", version = "0.6.1", dev_dependency = True)

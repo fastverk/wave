@@ -1,0 +1,55 @@
+name: release
+
+# Publish the wave OCI image (ghcr.io/fastverk/wave) and the helm chart
+# (oci://ghcr.io/fastverk/charts/wave) on a version tag, or on demand.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 0.1.0)"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    name: push image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazel-contrib/setup-bazel@0.10.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+      - name: derive version
+        id: v
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: ghcr login
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      # Pushes :latest (baked remote_tags) + the version tag. The image is
+      # built linux/amd64 here (ubuntu runner) — the EKS target arch.
+      - name: push image
+        run: bazel run //wave:image_push -- --tag "${{ steps.v.outputs.version }}"
+
+  chart:
+    name: push chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: ghcr login
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: package + push chart
+        run: |
+          helm package deploy/helm/wave
+          helm push wave-*.tgz oci://ghcr.io/fastverk/charts

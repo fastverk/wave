@@ -1,0 +1,90 @@
+# Default values for the wave chart.
+
+image:
+  repository: ghcr.io/fastverk/wave
+  # Defaults to the chart's appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Cron schedule for the wave tick (UTC). Discovery runs on this cadence;
+# reconcile (if enabled) runs on its own schedule below.
+schedule: "0 6 * * *"
+
+# Never overlap runs — the reconcile job is the single WaveStore writer.
+concurrencyPolicy: Forbid
+successfulJobsHistoryLimit: 3
+failedJobsHistoryLimit: 3
+# Per-job retry/cleanup.
+backoffLimit: 0
+restartPolicy: Never
+ttlSecondsAfterFinished: 86400
+
+forge:
+  # gitlab | github
+  kind: gitlab
+  # Instance host (empty = the forge default, e.g. gitlab.com / github.com).
+  host: gitlab.savvifi.com
+
+# The forge API token — a bot group-access token with `api` scope (open MRs
+# across the groups below). Provide via an existing Secret; its value is
+# exported to the container as FORGE_TOKEN (wave's universal token env).
+token:
+  existingSecret: wave-forge-token
+  secretKey: token
+
+# Discovery: one CronJob per group scans for out-of-date external deps.
+discover:
+  enabled: true
+  # Groups/orgs to scan (one CronJob each).
+  groups:
+    - aion
+    - studio
+    - infra
+  # Module-name prefixes owned by the internal cascade — skipped by discovery.
+  internalPrefixes:
+    - "@aion/"
+    - "@savvi-studio/"
+  # false = report-only (Phase 1). Set true once `wave discover --open` ships
+  # (Phase 2); --open writes to the WaveStore, so it also mounts the PVC and
+  # should be serialized with reconcile (see NOTES).
+  open: false
+
+# Reconcile: drive in-flight cascades to completion. The single WaveStore
+# writer; mounts the persistent volume.
+reconcile:
+  enabled: true
+  schedule: "*/15 * * * *"
+
+# WaveStore persistence ($FASTVERK_STATE_DIR) — survives across runs.
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  # Mount path; exported as FASTVERK_STATE_DIR.
+  stateDir: /var/lib/wave
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# RUST_LOG for the wave binary.
+logLevel: info

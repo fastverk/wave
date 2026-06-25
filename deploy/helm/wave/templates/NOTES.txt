@@ -1,0 +1,29 @@
+wave {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}".
+
+Image:    {{ include "wave.image" . }}
+Forge:    {{ .Values.forge.kind }}{{ if .Values.forge.host }} @ {{ .Values.forge.host }}{{ end }}
+
+Discovery CronJobs ({{ .Values.schedule }}):
+{{- range .Values.discover.groups }}
+  - group {{ . }}{{ if $.Values.discover.open }} (--open){{ else }} (report-only){{ end }}
+{{- end }}
+{{- if .Values.reconcile.enabled }}
+Reconcile CronJob: {{ .Values.reconcile.schedule }}
+{{- end }}
+
+Before this works, ensure the forge token Secret exists:
+
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.token.existingSecret }} \
+    --from-literal={{ .Values.token.secretKey }}=<gitlab-bot-token-with-api-scope>
+
+Inspect:
+  kubectl -n {{ .Release.Namespace }} get cronjobs -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} create job --from=cronjob/{{ include "wave.fullname" . }}-discover-{{ (first .Values.discover.groups) | lower | replace "/" "-" }} wave-discover-now
+
+{{- if .Values.discover.open }}
+
+NOTE: discover.open=true writes to the WaveStore. The discover CronJobs and the
+reconcile CronJob then share one ReadWriteOnce PVC — give them non-overlapping
+schedules (or a single-node affinity / RWX volume) so they don't contend, or
+consolidate onto a single `wave tick` job (Phase 2 follow-up).
+{{- end }}
