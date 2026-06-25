@@ -48,7 +48,7 @@ pub use edge::{
 };
 pub use graph::{propose, repo_key, PlanItem, RepoNode, WavePlan};
 pub use manifest::ForgeManifestSource;
-pub use provider::{BazelDepProvider, GraphProvider, NpmProvider, ProviderChain};
+pub use provider::{BazelDepProvider, CargoProvider, GraphProvider, NpmProvider, ProviderChain};
 pub use runner::{
     materialize, next_action, wave_id, ItemAction, NullObserver, WaveObserver, WaveRunner,
 };

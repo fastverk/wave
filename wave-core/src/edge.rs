@@ -13,6 +13,8 @@ pub enum EdgeKind {
     BazelDep,
     /// A `package.json` dependency.
     Npm,
+    /// A `Cargo.toml` dependency.
+    Cargo,
 }
 
 /// A normalized version constraint on a dependency.
@@ -36,6 +38,31 @@ impl VersionConstraint {
             Ok(v) => Self::Exact(v),
             Err(_) => Self::Other(s.trim().to_string()),
         }
+    }
+
+    /// Parse a Cargo dependency spec. Unlike npm, a bare `"1.2.3"` is a *caret*
+    /// requirement in Cargo (`^1.2.3`); `=1.2.3` is the exact pin.
+    #[must_use]
+    pub fn parse_cargo(spec: &str) -> Self {
+        let s = spec.trim();
+        if let Some(rest) = s.strip_prefix('^') {
+            if let Ok(v) = semver::Version::parse(rest.trim()) {
+                return Self::Caret(v);
+            }
+        }
+        if let Some(rest) = s.strip_prefix('=') {
+            if let Ok(v) = semver::Version::parse(rest.trim()) {
+                return Self::Exact(v);
+            }
+        }
+        // A bare, full `X.Y.Z` is caret in Cargo.
+        if let Ok(v) = semver::Version::parse(s) {
+            return Self::Caret(v);
+        }
+        if let Ok(req) = semver::VersionReq::parse(s) {
+            return Self::Range(req);
+        }
+        Self::Other(s.to_string())
     }
 
     /// Parse an npm dependency spec.

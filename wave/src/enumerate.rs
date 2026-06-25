@@ -10,6 +10,7 @@
 
 use anyhow::{bail, Context, Result};
 use forge::{Forge, ForgeKind, RepoRef};
+use futures::stream::StreamExt;
 use serde::Deserialize;
 use wave_core::{ForgeManifestSource, ManifestSource, ProviderChain, RepoNode};
 
@@ -125,7 +126,13 @@ async fn enumerate_github(
     Ok(out)
 }
 
-/// Build graph nodes for `specs` by reading each repo's manifest through `forge`.
+/// Max concurrent per-repo manifest reads. Keeps an org-wide scan from
+/// serializing on forge-API latency without tripping secondary rate limits.
+const REPO_CONCURRENCY: usize = 12;
+
+/// Build graph nodes for `specs` by reading each repo's manifest through `forge`,
+/// concurrently. A repo whose manifest can't be read (or none of the providers
+/// recognize) is skipped, not fatal — one bad repo shouldn't sink an org scan.
 pub async fn assemble_nodes<F: Forge + ?Sized>(
     forge: &F,
     specs: &[RepoSpec],
@@ -134,18 +141,29 @@ pub async fn assemble_nodes<F: Forge + ?Sized>(
     chain: &ProviderChain,
 ) -> Result<Vec<RepoNode>> {
     let src = ForgeManifestSource::new(forge);
-    let mut nodes = Vec::new();
-    for spec in specs {
-        let repo = RepoRef {
-            forge: forge.kind() as i32,
-            host: host.to_string(),
-            owner: owner.to_string(),
-            name: spec.name.clone(),
-        };
-        if let Some(node) = node_for(&src, &repo, chain).await? {
-            nodes.push(node);
-        }
-    }
+    let src_ref = &src;
+    let nodes: Vec<RepoNode> = futures::stream::iter(specs)
+        .map(|spec| {
+            let repo = RepoRef {
+                forge: forge.kind() as i32,
+                host: host.to_string(),
+                owner: owner.to_string(),
+                name: spec.name.clone(),
+            };
+            async move {
+                match node_for(src_ref, &repo, chain).await {
+                    Ok(node) => node,
+                    Err(e) => {
+                        tracing::warn!("skip {}: {e:#}", repo.name);
+                        None
+                    }
+                }
+            }
+        })
+        .buffer_unordered(REPO_CONCURRENCY)
+        .filter_map(|n| async move { n })
+        .collect()
+        .await;
     Ok(nodes)
 }
 
@@ -154,20 +172,32 @@ async fn node_for<F: Forge + ?Sized>(
     repo: &RepoRef,
     chain: &ProviderChain,
 ) -> Result<Option<RepoNode>> {
+    // Union edges across every manifest the repo has — a repo commonly carries
+    // both MODULE.bazel and Cargo.toml (and sometimes package.json), and
+    // discovery wants all of their external deps, not just the first match. The
+    // published name is taken from the first provider that declares one (Bazel,
+    // then npm, then Cargo) — its canonical registry artifact.
+    let mut edges = Vec::new();
+    let mut published: Option<String> = None;
+    let mut matched = false;
     for p in chain.providers() {
         let Some(text) = src.read(repo, p.manifest_name()).await? else {
             continue;
         };
-        let Some(edges) = p.parse_edges(&text) else {
+        let Some(mut es) = p.parse_edges(&text) else {
             continue;
         };
-        return Ok(Some(RepoNode {
-            repo: repo.clone(),
-            published: p.published_name(&text),
-            edges,
-        }));
+        matched = true;
+        if published.is_none() {
+            published = p.published_name(&text);
+        }
+        edges.append(&mut es);
     }
-    Ok(None)
+    Ok(matched.then(|| RepoNode {
+        repo: repo.clone(),
+        published,
+        edges,
+    }))
 }
 
 #[cfg(test)]

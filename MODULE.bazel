@@ -109,6 +109,14 @@ crate.spec(
     package = "prost-build",
     version = "0.13",
 )
+crate.spec(
+    package = "toml",
+    version = "0.8",
+)
+crate.spec(
+    package = "futures",
+    version = "0.3",
+)
 crate.from_specs(name = "crates")
 use_repo(crate, "crates")
 

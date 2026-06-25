@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use async_trait::async_trait;
 use forge::RepoRef;
+use futures::stream::StreamExt;
 
 use crate::edge::{decide, BumpDecision, EdgeKind, VersionConstraint};
 use crate::graph::{repo_key, RepoNode};
@@ -93,12 +94,19 @@ pub fn is_internal(module: &str, published: &HashSet<String>, cfg: &DiscoverConf
             .any(|p| module.starts_with(p.as_str()))
 }
 
+/// Max concurrent registry lookups. Registries (npm, crates.io sparse index)
+/// tolerate this comfortably; it keeps an org-wide scan from serializing on
+/// network latency.
+const POLL_CONCURRENCY: usize = 16;
+
 /// Scan assembled `nodes` for external-dependency updates, polling each matching
-/// [`Datasource`]. Each distinct `(kind, module)` is polled once (results are
-/// cached across repos). Edges that are internal, non-semver (`workspace:*`,
+/// [`Datasource`]. Each distinct `(kind, module)` is polled once, and the
+/// lookups run concurrently. Edges that are internal, non-semver (`workspace:*`,
 /// URLs), prerelease-only, or have no datasource for their ecosystem are
-/// skipped. Returns one [`Candidate`] per (repo, dependency) that needs a bump,
-/// stably ordered by repo then module.
+/// skipped. A lookup that errors is treated as "no info" (logged, not fatal) so
+/// one flaky registry response can't sink the whole scan. Returns one
+/// [`Candidate`] per (repo, dependency) that needs a bump, stably ordered by
+/// repo then module.
 pub async fn find_candidates(
     nodes: &[RepoNode],
     datasources: &[Box<dyn Datasource>],
@@ -107,37 +115,48 @@ pub async fn find_candidates(
     // Every module published by an enumerated repo is internal by construction.
     let published: HashSet<String> = nodes.iter().filter_map(|n| n.published.clone()).collect();
 
-    // Poll each (kind, module) at most once; `None` = looked up, no usable
-    // (stable, semver) latest.
-    let mut cache: HashMap<(EdgeKind, String), Option<semver::Version>> = HashMap::new();
-    let mut candidates: Vec<Candidate> = Vec::new();
-
+    // The distinct (kind, module) pairs that warrant a registry lookup: external,
+    // semver-bearing, and backed by a datasource. Deduped so each is polled once.
+    let mut to_poll: HashSet<(EdgeKind, String)> = HashSet::new();
     for node in nodes {
         for edge in &node.edges {
-            // Non-semver specs (workspace:*, git/URL, `catalog:`, tags) are not
-            // ours to bump from a registry.
             if matches!(edge.current, VersionConstraint::Other(_)) {
                 continue;
             }
             if is_internal(&edge.module, &published, cfg) {
                 continue;
             }
-            let Some(ds) = datasources.iter().find(|d| d.kind() == edge.kind) else {
-                continue; // no datasource for this ecosystem (yet)
-            };
+            if datasources.iter().any(|d| d.kind() == edge.kind) {
+                to_poll.insert((edge.kind, edge.module.clone()));
+            }
+        }
+    }
 
-            let key = (edge.kind, edge.module.clone());
-            let latest = match cache.get(&key) {
-                Some(v) => v.clone(),
-                None => {
-                    let v = resolve_latest(ds.as_ref(), &edge.module).await?;
-                    cache.insert(key, v.clone());
-                    v
-                }
-            };
-            let Some(latest) = latest else { continue };
+    // Poll concurrently (bounded). `None` = looked up, no usable stable version.
+    let cache: HashMap<(EdgeKind, String), Option<semver::Version>> =
+        futures::stream::iter(to_poll)
+            .map(|(kind, module)| async move {
+                let latest = match datasources.iter().find(|d| d.kind() == kind) {
+                    Some(ds) => resolve_latest(ds.as_ref(), &module).await.unwrap_or_else(|e| {
+                        tracing::warn!("datasource lookup for {module} failed: {e:#}");
+                        None
+                    }),
+                    None => None,
+                };
+                ((kind, module), latest)
+            })
+            .buffer_unordered(POLL_CONCURRENCY)
+            .collect()
+            .await;
 
-            let decision = decide(&edge.current, &latest, cfg.force);
+    // Build candidates from the cached lookups (pure, no I/O).
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for node in nodes {
+        for edge in &node.edges {
+            let Some(Some(latest)) = cache.get(&(edge.kind, edge.module.clone())) else {
+                continue;
+            };
+            let decision = decide(&edge.current, latest, cfg.force);
             if decision == BumpDecision::NeedsBump {
                 candidates.push(Candidate {
                     repo: node.repo.clone(),

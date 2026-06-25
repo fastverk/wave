@@ -1,6 +1,6 @@
 [package]
 name = "wave-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.95.0"
 license = "MIT"
@@ -16,10 +16,12 @@ anyhow = "1.0"
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 semver = "1"
 regex = "1"
 tracing = "0.1"
 tokio = { version = "1.40", features = ["full"] }
+futures = "0.3"
 prost = "0.13"
 chrono = { version = "0.4", features = ["serde"] }
 # Sibling forge module. Bazel resolves it as @forge//:forge (a module dep, NOT
