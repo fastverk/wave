@@ -8,6 +8,9 @@ rust_binary(
     name = "wave",
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
+    # async-trait is a proc-macro → proc_macro_deps, not deps (the `discover`
+    # datasource impls + the enumerate test's Forge mock both use #[async_trait]).
+    proc_macro_deps = ["@crates//:async-trait"],
     deps = [
         "//wave-core:wave_core",
         "@crates//:anyhow",
@@ -26,6 +29,4 @@ rust_test(
     name = "wave_test",
     crate = ":wave",
     edition = "2021",
-    # dev-only: the enumerate test's in-memory Forge mock.
-    proc_macro_deps = ["@crates//:async-trait"],
 )

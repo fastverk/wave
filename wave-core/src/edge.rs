@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use forge::RepoRef;
 
 /// Which manifest kind an edge came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeKind {
     /// `bazel_dep(name, version)` in MODULE.bazel.
     BazelDep,
@@ -75,6 +75,19 @@ impl VersionConstraint {
                 .unwrap_or(false),
             Self::Range(req) => req.matches(target),
             Self::Other(_) => false,
+        }
+    }
+}
+
+impl std::fmt::Display for VersionConstraint {
+    /// Render the constraint back to the spec a manifest would carry — used for
+    /// the discovery report (`^1.2.3`, `1.2.3`, `>=1, <2`, `workspace:*`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exact(v) => write!(f, "{v}"),
+            Self::Caret(v) => write!(f, "^{v}"),
+            Self::Range(r) => write!(f, "{r}"),
+            Self::Other(s) => write!(f, "{s}"),
         }
     }
 }

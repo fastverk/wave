@@ -3,7 +3,7 @@
 // `repo_slug` renders the forge-side plan (WavePlan.items[].repo is a forge
 // RepoRef); `pb_repo_slug` renders the stored wave/trace (pb RepoRef).
 use forge::repo_slug;
-use wave_core::{pb, pb_repo_slug, WavePlan};
+use wave_core::{pb, pb_repo_slug, Candidate, WavePlan};
 
 fn slug_opt(r: &Option<pb::RepoRef>) -> String {
     r.as_ref().map(pb_repo_slug).unwrap_or_default()
@@ -169,6 +169,33 @@ pub fn render_trace(trace: &pb::WaveTrace) -> String {
             item_state_name(span.final_state),
             dur
         ));
+    }
+    s
+}
+
+/// Render the discovery report: external out-of-date deps grouped by repo.
+#[must_use]
+pub fn render_discovery(candidates: &[Candidate]) -> String {
+    if candidates.is_empty() {
+        return "no external dependency updates found\n".to_string();
+    }
+    let repos = candidates
+        .iter()
+        .map(|c| repo_slug(&c.repo))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let mut s = format!(
+        "{} external update(s) across {repos} repo(s):\n",
+        candidates.len()
+    );
+    let mut last = String::new();
+    for c in candidates {
+        let slug = repo_slug(&c.repo);
+        if slug != last {
+            s.push_str(&format!("\n{slug}  ({})\n", c.manifest_path));
+            slug.clone_into(&mut last);
+        }
+        s.push_str(&format!("  {:<34} {} → {}\n", c.module, c.current, c.latest));
     }
     s
 }

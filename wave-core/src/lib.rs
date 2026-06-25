@@ -12,6 +12,9 @@
 //! - [`graph`] assembles the cross-repo DAG, computes the affected set + tiers,
 //!   and emits a topologically-ordered [`WavePlan`] ([`propose`]);
 //! - [`edge`] is the version-constraint model + bump policy.
+//! - [`discover`] is the complement to [`propose`]: it polls registry
+//!   [`Datasource`](discover::Datasource)s for newer *external* dependency
+//!   versions and reports the repos whose pins need a bump.
 //!
 //! Actuation (opening/merging changes via a forge) is layered on top through
 //! the `fastverk-forge` [`forge::Forge`] trait:
@@ -30,6 +33,7 @@ pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/wave.v1.rs"));
 }
 
+pub mod discover;
 pub mod edge;
 pub mod graph;
 pub mod manifest;
@@ -38,6 +42,7 @@ pub mod runner;
 pub mod store;
 pub mod trace;
 
+pub use discover::{find_candidates, is_internal, Candidate, Datasource, DiscoverConfig, VersionInfo};
 pub use edge::{
     decide, BumpDecision, DepEdge, EdgeKind, ManifestSource, VersionConstraint,
 };

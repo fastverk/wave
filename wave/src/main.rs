@@ -8,8 +8,10 @@
 //! `FORGE_TOKEN`). Repos are enumerated from a `--group`/`--org` via the forge
 //! REST API, or passed explicitly with `--repos a,b,c`.
 //!
-//! Subcommands: `propose`, `start`, `status`, `reconcile`, `trace`.
+//! Subcommands: `propose`, `start`, `status`, `reconcile`, `trace`, `discover`.
 
+mod datasource;
+mod discover;
 mod enumerate;
 mod forge_factory;
 mod render;
@@ -55,6 +57,8 @@ enum Cmd {
         /// Wave id.
         id: String,
     },
+    /// Scan a group for out-of-date external (3rd-party) dependencies.
+    Discover(DiscoverArgs),
 }
 
 #[derive(Args)]
@@ -80,6 +84,30 @@ struct PlanArgs {
     force: bool,
 }
 
+#[derive(Args)]
+pub struct DiscoverArgs {
+    /// Forge: github | gitlab.
+    #[arg(long, default_value = "gitlab")]
+    forge: String,
+    /// Instance host (e.g. gitlab.savvifi.com); empty = the forge default.
+    #[arg(long, default_value = "")]
+    host: String,
+    /// Org (GitHub) or group path (GitLab) to scan. Ignored if --repos set.
+    #[arg(long, default_value = "")]
+    group: String,
+    /// Explicit repo names (comma-separated) instead of enumerating a group.
+    #[arg(long, value_delimiter = ',')]
+    repos: Vec<String>,
+    /// Module-name prefixes treated as internal (owned by the cascade, skipped
+    /// by discovery). Repeatable, e.g. `--internal-prefix @aion/
+    /// --internal-prefix @savvi-studio/`.
+    #[arg(long = "internal-prefix")]
+    internal_prefixes: Vec<String>,
+    /// Report bumps even where a caret/range already admits the latest version.
+    #[arg(long)]
+    force: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -98,6 +126,7 @@ async fn main() -> Result<()> {
         Cmd::Status { id } => status(&store_path, id.as_deref()),
         Cmd::Reconcile { id } => reconcile(&store_path, id.as_deref()).await,
         Cmd::Trace { id } => trace(&store_path, &id),
+        Cmd::Discover(a) => discover::run(&a).await,
     }
 }
 
