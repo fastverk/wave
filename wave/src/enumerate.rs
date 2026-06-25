@@ -83,6 +83,8 @@ struct GhRepo {
     name: String,
     #[serde(default)]
     archived: bool,
+    #[serde(default)]
+    fork: bool,
 }
 
 async fn enumerate_github(
@@ -115,10 +117,12 @@ async fn enumerate_github(
         if repos.is_empty() {
             break;
         }
+        // Skip archived repos and forks — discovery doesn't manage a vendored
+        // fork's upstream deps (e.g. a next.js fork with hundreds of npm deps).
         out.extend(
             repos
                 .into_iter()
-                .filter(|r| !r.archived)
+                .filter(|r| !r.archived && !r.fork)
                 .map(|r| RepoSpec { name: r.name }),
         );
         page += 1;
