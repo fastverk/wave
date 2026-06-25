@@ -6,19 +6,19 @@ independent of forge's across the module boundary. The forge dependency is
 `@forge//:forge` (a module dep); wave-core converts to/from forge's runtime
 RepoRef/ChangeRef at the forge edge."""
 
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
 cargo_build_script(
     name = "build_script",
     srcs = ["build.rs"],
-    data = ["//proto/wave/v1:wave.proto"],
-    edition = "2021",
     build_script_env = {
         "PROTOC": "$(execpath @protobuf//:protoc)",
     },
+    data = ["//proto/wave/v1:wave.proto"],
+    edition = "2021",
     tools = ["@protobuf//:protoc"],
     deps = ["@crates//:prost-build"],
 )
@@ -40,7 +40,7 @@ rust_library(
         "@crates//:serde_json",
         "@crates//:tokio",
         "@crates//:tracing",
-        "@forge//:forge",
+        "@forge",
     ],
 )
 

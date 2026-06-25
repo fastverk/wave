@@ -21,7 +21,7 @@ rust_binary(
         "@crates//:tracing",
         "@crates//:tracing-subscriber",
         "@crates//:urlencoding",
-        "@forge//:forge",
+        "@forge",
     ],
 )
 

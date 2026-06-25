@@ -24,6 +24,7 @@ rust.toolchain(
     versions = ["1.95.0"],
 )
 use_repo(rust, "rust_toolchains")
+
 register_toolchains("@rust_toolchains//:all")
 
 # Third-party crates only (forge is a module dep, above). Hand-listed via
@@ -34,46 +35,80 @@ crate = use_extension(
     "crate",
     isolate = True,
 )
-crate.spec(package = "anyhow", version = "1.0")
-crate.spec(package = "async-trait", version = "0.1")
-crate.spec(package = "serde", version = "1.0", features = ["derive"])
-crate.spec(package = "serde_json", version = "1.0")
-crate.spec(package = "semver", version = "1")
-crate.spec(package = "regex", version = "1")
-crate.spec(package = "tracing", version = "0.1")
 crate.spec(
+    package = "anyhow",
+    version = "1.0",
+)
+crate.spec(
+    package = "async-trait",
+    version = "0.1",
+)
+crate.spec(
+    features = ["derive"],
+    package = "serde",
+    version = "1.0",
+)
+crate.spec(
+    package = "serde_json",
+    version = "1.0",
+)
+crate.spec(
+    package = "semver",
+    version = "1",
+)
+crate.spec(
+    package = "regex",
+    version = "1",
+)
+crate.spec(
+    package = "tracing",
+    version = "0.1",
+)
+crate.spec(
+    features = ["env-filter"],
     package = "tracing-subscriber",
     version = "0.3",
-    features = ["env-filter"],
 )
 crate.spec(
+    features = ["full"],
     package = "tokio",
     version = "1.40",
-    features = ["full"],
 )
-crate.spec(package = "prost", version = "0.13")
 crate.spec(
+    package = "prost",
+    version = "0.13",
+)
+crate.spec(
+    features = ["serde"],
     package = "chrono",
     version = "0.4",
-    features = ["serde"],
 )
 crate.spec(
+    features = ["derive"],
     package = "clap",
     version = "4.5",
-    features = ["derive"],
 )
 crate.spec(
-    package = "reqwest",
-    version = "0.12",
     default_features = False,
     features = [
         "json",
         "rustls-tls",
     ],
+    package = "reqwest",
+    version = "0.12",
 )
-crate.spec(package = "urlencoding", version = "2")
-crate.spec(package = "tempfile", version = "3")
-crate.spec(package = "prost-build", version = "0.13")
+crate.spec(
+    package = "urlencoding",
+    version = "2",
+)
+crate.spec(
+    package = "tempfile",
+    version = "3",
+)
+crate.spec(
+    package = "prost-build",
+    version = "0.13",
+)
 crate.from_specs(name = "crates")
 use_repo(crate, "crates")
 
