@@ -1,0 +1,102 @@
+{{- if .Values.discover.enabled }}
+{{- $root := . }}
+{{- range $group := .Values.discover.groups }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "wave.fullname" $root }}-discover-{{ $group | lower | replace "/" "-" | trunc 40 | trimSuffix "-" }}
+  labels:
+    {{- include "wave.labels" $root | nindent 4 }}
+    wave.fastverk.dev/action: discover
+spec:
+  schedule: {{ $root.Values.schedule | quote }}
+  concurrencyPolicy: {{ $root.Values.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ $root.Values.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $root.Values.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $root.Values.backoffLimit }}
+      {{- with $root.Values.ttlSecondsAfterFinished }}
+      ttlSecondsAfterFinished: {{ . }}
+      {{- end }}
+      template:
+        metadata:
+          {{- with $root.Values.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          labels:
+            {{- include "wave.selectorLabels" $root | nindent 12 }}
+        spec:
+          restartPolicy: {{ $root.Values.restartPolicy }}
+          serviceAccountName: {{ include "wave.serviceAccountName" $root }}
+          {{- with $root.Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $root.Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $root.Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $root.Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: wave-discover
+              image: {{ include "wave.image" $root | quote }}
+              imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+              args:
+                - discover
+                - --forge
+                - {{ $root.Values.forge.kind | quote }}
+                {{- if $root.Values.forge.host }}
+                - --host
+                - {{ $root.Values.forge.host | quote }}
+                {{- end }}
+                - --group
+                - {{ $group | quote }}
+                {{- range $root.Values.discover.internalPrefixes }}
+                - --internal-prefix
+                - {{ . | quote }}
+                {{- end }}
+                {{- if $root.Values.discover.open }}
+                - --open
+                {{- end }}
+              env:
+                - name: FORGE_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $root.Values.token.existingSecret | quote }}
+                      key: {{ $root.Values.token.secretKey | quote }}
+                - name: RUST_LOG
+                  value: {{ $root.Values.logLevel | quote }}
+                {{- if $root.Values.discover.open }}
+                # --open writes to the WaveStore; persist it.
+                - name: FASTVERK_STATE_DIR
+                  value: {{ $root.Values.persistence.stateDir | quote }}
+                {{- end }}
+              {{- if $root.Values.discover.open }}
+              volumeMounts:
+                - name: state
+                  mountPath: {{ $root.Values.persistence.stateDir | quote }}
+              {{- end }}
+              resources:
+                {{- toYaml $root.Values.resources | nindent 16 }}
+          {{- if $root.Values.discover.open }}
+          volumes:
+            - name: state
+              {{- if $root.Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ include "wave.fullname" $root }}-state
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+          {{- end }}
+{{- end }}
+{{- end }}

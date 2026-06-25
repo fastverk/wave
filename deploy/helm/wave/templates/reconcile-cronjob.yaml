@@ -1,0 +1,76 @@
+{{- if .Values.reconcile.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "wave.fullname" . }}-reconcile
+  labels:
+    {{- include "wave.labels" . | nindent 4 }}
+    wave.fastverk.dev/action: reconcile
+spec:
+  schedule: {{ .Values.reconcile.schedule | quote }}
+  concurrencyPolicy: {{ .Values.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.backoffLimit }}
+      {{- with .Values.ttlSecondsAfterFinished }}
+      ttlSecondsAfterFinished: {{ . }}
+      {{- end }}
+      template:
+        metadata:
+          {{- with .Values.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          labels:
+            {{- include "wave.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: {{ .Values.restartPolicy }}
+          serviceAccountName: {{ include "wave.serviceAccountName" . }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: wave-reconcile
+              image: {{ include "wave.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args:
+                - reconcile
+              env:
+                - name: FORGE_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.token.existingSecret | quote }}
+                      key: {{ .Values.token.secretKey | quote }}
+                - name: RUST_LOG
+                  value: {{ .Values.logLevel | quote }}
+                - name: FASTVERK_STATE_DIR
+                  value: {{ .Values.persistence.stateDir | quote }}
+              volumeMounts:
+                - name: state
+                  mountPath: {{ .Values.persistence.stateDir | quote }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+          volumes:
+            - name: state
+              {{- if .Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ include "wave.fullname" . }}-state
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+{{- end }}

@@ -1,5 +1,7 @@
 """wave — the cross-repo dependency-cascade CLI."""
 
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
@@ -29,4 +31,36 @@ rust_test(
     name = "wave_test",
     crate = ":wave",
     edition = "2021",
+)
+
+# ─── OCI image ─────────────────────────────────────────────────────
+# The wave binary + its runfiles on distroless/cc, rooted at /app.
+# `bazel run //wave:image_load` loads it into the local docker/podman;
+# `bazel run //wave:image_push` pushes to GHCR (CI, on linux). The helm
+# chart (//deploy/helm/wave) deploys this image as a CronJob.
+pkg_tar(
+    name = "image_layer",
+    srcs = [":wave"],
+    include_runfiles = True,
+    package_dir = "/app",
+)
+
+oci_image(
+    name = "image",
+    base = "@distroless_cc",
+    entrypoint = ["/app/wave"],
+    tars = [":image_layer"],
+)
+
+oci_load(
+    name = "image_load",
+    image = ":image",
+    repo_tags = ["ghcr.io/fastverk/wave:latest"],
+)
+
+oci_push(
+    name = "image_push",
+    image = ":image",
+    remote_tags = ["latest"],
+    repository = "ghcr.io/fastverk/wave",
 )
