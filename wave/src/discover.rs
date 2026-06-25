@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use wave_core::{find_candidates, Datasource, DiscoverConfig, ProviderChain};
 
-use crate::datasource::NpmDatasource;
+use crate::datasource::{CargoDatasource, NpmDatasource};
 use crate::{enumerate, forge_factory, render, DiscoverArgs};
 
 pub async fn run(a: &DiscoverArgs) -> Result<()> {
@@ -25,6 +25,11 @@ pub async fn run(a: &DiscoverArgs) -> Result<()> {
         }
         enumerate::enumerate(kind, &host, &a.group, &token).await?
     } else {
+        // --repos still needs --group: it's the owner/namespace each repo lives
+        // under (e.g. `fastverk/<repo>`), used to address the forge API.
+        if a.group.is_empty() {
+            anyhow::bail!("--repos also needs --group <org/group> (the owner the repos live under)");
+        }
         a.repos
             .iter()
             .map(|n| enumerate::RepoSpec { name: n.clone() })
@@ -35,11 +40,14 @@ pub async fn run(a: &DiscoverArgs) -> Result<()> {
     let nodes = enumerate::assemble_nodes(forge.as_ref(), &specs, &host, &a.group, &chain).await?;
 
     let http = reqwest::Client::builder()
-        .user_agent("wave")
+        // crates.io requires a descriptive User-Agent.
+        .user_agent("wave (+https://github.com/fastverk/wave)")
         .build()
         .context("build http client")?;
-    // Phase 1: npm only. Cargo / Docker / BCR datasources land in Phase 3.
-    let datasources: Vec<Box<dyn Datasource>> = vec![Box::new(NpmDatasource::new(http))];
+    let datasources: Vec<Box<dyn Datasource>> = vec![
+        Box::new(NpmDatasource::new(http.clone())),
+        Box::new(CargoDatasource::new(http)),
+    ];
 
     let cfg = DiscoverConfig {
         internal_prefixes: a.internal_prefixes.clone(),

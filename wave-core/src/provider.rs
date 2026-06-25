@@ -43,12 +43,13 @@ impl ProviderChain {
         Self { providers }
     }
 
-    /// The default chain: Bazel first, then npm.
+    /// The default chain: Bazel, then npm, then Cargo.
     #[must_use]
     pub fn default_chain() -> Self {
         Self::new(vec![
             Box::new(BazelDepProvider::new()),
             Box::new(NpmProvider::new()),
+            Box::new(CargoProvider::new()),
         ])
     }
 
@@ -248,6 +249,126 @@ impl GraphProvider for NpmProvider {
     }
 }
 
+// ─── Cargo ──────────────────────────────────────────────────────────────
+
+/// Reads `[dependencies]` / `[dev-dependencies]` / `[build-dependencies]` +
+/// `[workspace.dependencies]` from `Cargo.toml`, and the `[package]` name +
+/// version this crate publishes. Path / git / `workspace = true` deps are
+/// skipped (no registry version to track).
+pub struct CargoProvider {
+    /// `name = "ver"` — the string-form dependency (`ver` anchored on a leading
+    /// digit so non-version keys and the inline-table form are left alone).
+    dep_re: Regex,
+}
+
+impl CargoProvider {
+    const SECTIONS: [&'static str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            dep_re: Regex::new(
+                r#"(?m)^(?P<head>\s*(?P<name>[A-Za-z0-9_-]+)\s*=\s*")(?P<ver>[0-9][^"]*)(?P<tail>")"#,
+            )
+            .expect("valid cargo dependency regex"),
+        }
+    }
+
+    /// The version constraint from a dependency value (string or inline table),
+    /// or `None` for path / git / workspace deps.
+    fn constraint(spec: &toml::Value) -> Option<VersionConstraint> {
+        match spec {
+            toml::Value::String(s) => Some(VersionConstraint::parse_cargo(s)),
+            toml::Value::Table(t) => {
+                let is_workspace = t.get("workspace").and_then(|w| w.as_bool()) == Some(true);
+                if is_workspace || t.contains_key("path") || t.contains_key("git") {
+                    return None;
+                }
+                t.get("version")
+                    .and_then(|v| v.as_str())
+                    .map(VersionConstraint::parse_cargo)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Default for CargoProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphProvider for CargoProvider {
+    fn manifest_name(&self) -> &'static str {
+        "Cargo.toml"
+    }
+    fn kind(&self) -> EdgeKind {
+        EdgeKind::Cargo
+    }
+
+    fn published_name(&self, text: &str) -> Option<String> {
+        let v: toml::Value = toml::from_str(text).ok()?;
+        v.get("package")?.get("name")?.as_str().map(str::to_string)
+    }
+
+    fn published_version(&self, text: &str) -> Option<String> {
+        // A workspace member may carry `version.workspace = true`; only a
+        // concrete string is reported (the workspace floor lives elsewhere).
+        let v: toml::Value = toml::from_str(text).ok()?;
+        v.get("package")?.get("version")?.as_str().map(str::to_string)
+    }
+
+    fn parse_edges(&self, text: &str) -> Option<Vec<DepEdge>> {
+        let v: toml::Value = toml::from_str(text).ok()?;
+        if !v.is_table() {
+            return None;
+        }
+        let mut tables: Vec<&toml::Table> = Vec::new();
+        for section in Self::SECTIONS {
+            if let Some(t) = v.get(section).and_then(|s| s.as_table()) {
+                tables.push(t);
+            }
+        }
+        if let Some(t) = v
+            .get("workspace")
+            .and_then(|w| w.get("dependencies"))
+            .and_then(|d| d.as_table())
+        {
+            tables.push(t);
+        }
+        let mut edges = Vec::new();
+        for tbl in tables {
+            for (name, spec) in tbl {
+                if let Some(current) = Self::constraint(spec) {
+                    edges.push(DepEdge {
+                        module: name.clone(),
+                        current,
+                        manifest_path: self.manifest_name().to_string(),
+                        kind: EdgeKind::Cargo,
+                    });
+                }
+            }
+        }
+        Some(edges)
+    }
+
+    fn bump(&self, text: &str, module: &str, target: &str) -> (String, bool) {
+        // String form only (`module = "ver"`). Inline-table `{ version = "…" }`
+        // rewriting is a Phase-2 follow-up — discovery is report-only today.
+        let mut changed = false;
+        let out = self.dep_re.replace_all(text, |c: &Captures| {
+            if &c["name"] == module {
+                changed = true;
+                format!("{}{target}{}", &c["head"], &c["tail"])
+            } else {
+                c[0].to_string()
+            }
+        });
+        (out.into_owned(), changed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +453,55 @@ bazel_dep(
         let chain = ProviderChain::default_chain();
         assert!(chain.for_manifest("MODULE.bazel").is_some());
         assert!(chain.for_manifest("package.json").is_some());
-        assert!(chain.for_manifest("Cargo.toml").is_none());
+        assert!(chain.for_manifest("Cargo.toml").is_some());
+        assert!(chain.for_manifest("go.mod").is_none());
+    }
+
+    const CARGO_TOML: &str = r#"
+[package]
+name = "wave-core"
+version = "0.1.0"
+
+[dependencies]
+anyhow = "1.0.86"
+serde = { version = "1.0", features = ["derive"] }
+fastverk-forge = { path = "../../forge" }
+local-thing = { git = "https://example.com/x" }
+shared = { workspace = true }
+
+[build-dependencies]
+prost-build = "0.13"
+
+[workspace.dependencies]
+tokio = { version = "1.40", features = ["full"] }
+"#;
+
+    #[test]
+    fn cargo_parse_and_publish() {
+        let p = CargoProvider::new();
+        assert_eq!(p.published_name(CARGO_TOML).as_deref(), Some("wave-core"));
+        assert_eq!(p.published_version(CARGO_TOML).as_deref(), Some("0.1.0"));
+        let edges = p.parse_edges(CARGO_TOML).unwrap();
+        let modules: Vec<_> = edges.iter().map(|e| e.module.as_str()).collect();
+        // registry deps kept; path / git / workspace=true skipped.
+        assert!(modules.contains(&"anyhow"));
+        assert!(modules.contains(&"serde"));
+        assert!(modules.contains(&"prost-build"));
+        assert!(modules.contains(&"tokio")); // from [workspace.dependencies]
+        assert!(!modules.contains(&"fastverk-forge"));
+        assert!(!modules.contains(&"local-thing"));
+        assert!(!modules.contains(&"shared"));
+        // bare "1.0" is caret in Cargo.
+        let anyhow = edges.iter().find(|e| e.module == "anyhow").unwrap();
+        assert!(matches!(anyhow.current, VersionConstraint::Caret(_)));
+    }
+
+    #[test]
+    fn cargo_bump_string_form() {
+        let p = CargoProvider::new();
+        let (out, changed) = p.bump(CARGO_TOML, "anyhow", "1.1.0");
+        assert!(changed);
+        assert!(out.contains(r#"anyhow = "1.1.0""#));
+        assert!(out.contains(r#"prost-build = "0.13""#)); // neighbor untouched
     }
 }
