@@ -1,7 +1,7 @@
 common --enable_bzlmod
 common --experimental_isolated_extension_usages
 
-common --registry=https://raw.githubusercontent.com/fastverk/bazel-registry/main/
+common --registry=https://registry.fastverk.com/
 common --registry=https://bcr.bazel.build/
 
 common --action_env=HOME
