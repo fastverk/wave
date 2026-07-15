@@ -187,6 +187,35 @@ impl NpmProvider {
             .expect("valid npm dependency regex"),
         }
     }
+
+    /// Byte range of top-level key `name`'s value, or `None` if absent.
+    ///
+    /// This is what keeps [`GraphProvider::bump`] honest: `parse_edges` reads
+    /// only [`Self::SECTIONS`], so a bump must rewrite only those. A whole-file
+    /// regex also hits `pnpm.overrides` / `resolutions` — which are deliberate
+    /// resolution pins, not dependency declarations. Rewriting the handful that
+    /// happen to share a name with a dependency leaves the rest of that map at
+    /// its old versions (an INCONSISTENT override set) and silently moves a pin
+    /// someone set on purpose.
+    ///
+    /// **Why not just parse → mutate → serialize?** Because a round-trip reflows
+    /// the file. `package.json` is 2-space-canonical *often* but not always (4
+    /// spaces, tabs, no trailing newline), and when it isn't, the "bump one dep"
+    /// change silently becomes a whole-file reformat — an unreviewable diff and a
+    /// conflict magnet, and it fails quietly. Surgery on the original bytes can't
+    /// have that failure mode.
+    ///
+    /// **Why not hand-roll a scanner?** No need: `RawValue` hands back the
+    /// section's VERBATIM source text, so serde does all the parsing (escapes,
+    /// nesting, unicode) and locating it is one substring search.
+    fn section_span(text: &str, name: &str) -> Option<(usize, usize)> {
+        let doc: std::collections::BTreeMap<&str, &serde_json::value::RawValue> =
+            serde_json::from_str(text).ok()?;
+        let raw = doc.get(name)?.get();
+        // `raw` is a verbatim slice of `text`, so it is present by construction.
+        let start = text.find(raw)?;
+        Some((start, start + raw.len()))
+    }
 }
 
 impl Default for NpmProvider {
@@ -240,16 +269,37 @@ impl GraphProvider for NpmProvider {
         // Rewrite only the entry whose key matches `module`, keeping any
         // caret/tilde operator. Non-semver specs never match (the `ver` group is
         // anchored on a leading digit).
+        //
+        // Scoped to the SECTIONS parse_edges reads. A whole-file pass would also
+        // rewrite `pnpm.overrides` / `resolutions`, whose entries are resolution
+        // pins rather than declarations — see top_level_object_span. Sections are
+        // rewritten back-to-front so earlier spans keep their offsets.
+        let mut spans: Vec<(usize, usize)> = Self::SECTIONS
+            .iter()
+            .filter_map(|s| Self::section_span(text, s))
+            .collect();
+        spans.sort_by_key(|(start, _)| *start);
+
+        let mut out = text.to_string();
         let mut changed = false;
-        let out = self.dep_re.replace_all(text, |c: &Captures| {
-            if &c["name"] == module {
+        for (start, end) in spans.into_iter().rev() {
+            let section = &out[start..end];
+            let mut section_changed = false;
+            let next = self.dep_re.replace_all(section, |c: &Captures| {
+                if &c["name"] == module {
+                    section_changed = true;
+                    format!("{}{}{target}{}", &c["head"], &c["op"], &c["tail"])
+                } else {
+                    c[0].to_string()
+                }
+            });
+            if section_changed {
+                let rewritten = next.into_owned();
+                out.replace_range(start..end, &rewritten);
                 changed = true;
-                format!("{}{}{target}{}", &c["head"], &c["op"], &c["tail"])
-            } else {
-                c[0].to_string()
             }
-        });
-        (out.into_owned(), changed)
+        }
+        (out, changed)
     }
 }
 
@@ -659,6 +709,78 @@ tokio = { version = "1.40", features = ["full"] }
         assert!(changed);
         assert!(out.contains(r#"anyhow = "1.1.0""#));
         assert!(out.contains(r#"prost-build = "0.13""#)); // neighbor untouched
+    }
+
+    // Shaped after aion/web: the SAME module appears in `dependencies` (a
+    // declaration wave owns) and in `pnpm.overrides` (a deliberate resolution
+    // pin it does not).
+    const PACKAGE_JSON_WITH_OVERRIDES: &str = r#"{
+  "name": "@savvi-studio/web",
+  "private": true,
+  "dependencies": {
+    "@aion/graph-module-compile": "^0.5.1",
+    "@aion/kernel": "catalog:",
+    "next": "15.0.0"
+  },
+  "devDependencies": {
+    "@aion/graph-module-compile": "^0.5.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "@aion/graph-module-compile": "0.6.2",
+      "@aion/db-pglite": "0.2.1"
+    }
+  }
+}
+"#;
+
+    #[test]
+    fn npm_bump_never_touches_pnpm_overrides() {
+        // Regression: parse_edges is section-scoped (serde), but bump used to run
+        // its regex over the WHOLE file, so it silently rewrote pnpm.overrides
+        // too. That moves a pin someone set deliberately, and — since only the
+        // entries that happen to share a name with a dependency get moved —
+        // leaves the rest of the override map at its old versions, i.e. an
+        // inconsistent resolution set. Caught by a real MR on aion/web.
+        let p = NpmProvider::new();
+        let (out, changed) = p.bump(PACKAGE_JSON_WITH_OVERRIDES, "@aion/graph-module-compile", "0.6.3");
+        assert!(changed);
+        // Declarations bumped, operator preserved.
+        assert!(out.contains(r#""@aion/graph-module-compile": "^0.6.3""#));
+        assert_eq!(
+            out.matches(r#""@aion/graph-module-compile": "^0.6.3""#).count(),
+            2,
+            "both dependencies and devDependencies are declarations"
+        );
+        // The override is UNTOUCHED.
+        assert!(
+            out.contains(r#""@aion/graph-module-compile": "0.6.2""#),
+            "pnpm.overrides must not be rewritten:\n{out}"
+        );
+        assert!(out.contains(r#""@aion/db-pglite": "0.2.1""#));
+        // Neighbors intact.
+        assert!(out.contains(r#""next": "15.0.0""#));
+        assert!(out.contains(r#""@aion/kernel": "catalog:""#));
+    }
+
+    #[test]
+    fn npm_bump_still_reaches_every_declaration_section() {
+        let p = NpmProvider::new();
+        let (out, _) = p.bump(PACKAGE_JSON_WITH_OVERRIDES, "next", "15.1.0");
+        assert!(out.contains(r#""next": "15.1.0""#));
+    }
+
+    #[test]
+    fn npm_parse_edges_ignores_overrides_too() {
+        // parse_edges was always correct — this pins the invariant that bump now
+        // matches it, so the two can't drift apart again.
+        let p = NpmProvider::new();
+        let edges = p.parse_edges(PACKAGE_JSON_WITH_OVERRIDES).unwrap();
+        assert_eq!(
+            edges.iter().filter(|e| e.module == "@aion/db-pglite").count(),
+            0,
+            "an override is not a declared edge"
+        );
     }
 
     // ── pnpm catalog ────────────────────────────────────────────────────
