@@ -51,6 +51,20 @@ func TestWaveArgs_AionWebGated(t *testing.T) {
 	}
 }
 
+func TestWaveArgs_OnlyInternalSupersedesIncludeInternal(t *testing.T) {
+	wc := aionWeb()
+	wc.Spec.Policy.OnlyInternal = true // IncludeInternal is already true
+	got := joined(wc)
+	if !strings.Contains(got, "--only-internal") {
+		t.Fatalf("onlyInternal must pass --only-internal: %s", got)
+	}
+	// --only-internal implies --include-internal; passing both reads as if they
+	// were independent knobs.
+	if strings.Contains(got, "--include-internal") {
+		t.Fatalf("--include-internal is redundant alongside --only-internal: %s", got)
+	}
+}
+
 func TestWaveArgs_OpenArmsAutoMerge(t *testing.T) {
 	wc := aionWeb()
 	wc.Spec.Policy.Autonomy = "Open"

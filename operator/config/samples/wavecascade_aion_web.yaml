@@ -28,11 +28,15 @@ spec:
     # policy.includeInternal below flips it to "bump it".
     internalPrefixes: ["@aion/"]
   policy:
-    includeInternal: true
-    # Load-bearing: the catalog pins ^0.2.0 and @aion/http-utils is at 0.2.3 —
-    # the caret ALREADY ADMITS it, so without force there is nothing to do and
-    # the lockfile floor never moves.
-    force: true
+    # ONLY the @aion/* modules. includeInternal would ADD them to the third-party
+    # set, so the same change would also carry ~49 @aws-sdk/etc bumps — a
+    # different blast radius and a different reviewer.
+    onlyInternal: true
+    # force: false ⇒ only the pins the caret genuinely CANNOT satisfy (10 on
+    # aion/web today). With force it also advances floors the caret already
+    # admits (^0.2.0 → 0.2.3), which the lockfile picks up on install anyway —
+    # 125 more entries of mostly-noise. Start narrow.
+    force: false
     # Gated: open the change and hold it for review. Switch to Open only once a
     # run has been eyeballed — see the warning below.
     autonomy: Gated

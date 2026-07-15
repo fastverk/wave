@@ -75,6 +75,35 @@ pub struct DiscoverConfig {
     ///
     /// Default `false` keeps discovery and the cascade disjoint, as before.
     pub include_internal: bool,
+    /// Restrict the report to modules matching [`Self::internal_prefixes`] —
+    /// "bring THIS repo's first-party pins up to latest" WITHOUT dragging every
+    /// third-party dependency into the same change. Implies
+    /// [`Self::include_internal`].
+    ///
+    /// Without this, opting internal in *adds* to the external set rather than
+    /// selecting it, so a first-party bump would also carry unrelated registry
+    /// churn — a different change, with a different blast radius and a different
+    /// reviewer.
+    pub only_internal: bool,
+}
+
+impl DiscoverConfig {
+    /// Are prefix-matched modules poll-eligible? Either mode opts them in.
+    fn internal_opted_in(&self) -> bool {
+        self.include_internal || self.only_internal
+    }
+
+    /// Does `module` match a configured internal prefix?
+    fn matches_internal_prefix(&self, module: &str) -> bool {
+        self.internal_prefixes
+            .iter()
+            .any(|p| module.starts_with(p.as_str()))
+    }
+
+    /// Is `module` filtered out by [`Self::only_internal`]?
+    fn excluded_by_only_internal(&self, module: &str) -> bool {
+        self.only_internal && !self.matches_internal_prefix(module)
+    }
 }
 
 /// One external-dependency update opportunity for one repo.
@@ -102,12 +131,7 @@ pub struct Candidate {
 /// relaxes the weaker prefix rule (see that field).
 #[must_use]
 pub fn is_internal(module: &str, published: &HashSet<String>, cfg: &DiscoverConfig) -> bool {
-    published.contains(module)
-        || (!cfg.include_internal
-            && cfg
-                .internal_prefixes
-                .iter()
-                .any(|p| module.starts_with(p.as_str())))
+    published.contains(module) || (!cfg.internal_opted_in() && cfg.matches_internal_prefix(module))
 }
 
 /// Max concurrent registry lookups. Registries (npm, crates.io sparse index)
@@ -140,6 +164,9 @@ pub async fn find_candidates(
                 continue;
             }
             if is_internal(&edge.module, &published, cfg) {
+                continue;
+            }
+            if cfg.excluded_by_only_internal(&edge.module) {
                 continue;
             }
             if datasources.iter().any(|d| d.kind() == edge.kind) {
@@ -179,6 +206,12 @@ pub async fn find_candidates(
             // propose rewriting `"catalog:"` into a literal version — destroying
             // the indirection. Skip explicitly.
             if matches!(edge.current, VersionConstraint::Other(_)) {
+                continue;
+            }
+            // Mirror the poll loop's filter. Relying on the cache miss alone is
+            // what let the opaque-spec bug through, so both guards are explicit
+            // in both loops.
+            if cfg.excluded_by_only_internal(&edge.module) {
                 continue;
             }
             let Some(Some(latest)) = cache.get(&(edge.kind, edge.module.clone())) else {
@@ -329,6 +362,7 @@ mod tests {
             internal_prefixes: vec!["@aion/".into()],
             force: false,
             include_internal: false,
+            only_internal: false,
         };
         let cands = find_candidates(&nodes, &ds(&[("@aion/kernel", "0.5.0")]), &cfg)
             .await
@@ -345,6 +379,7 @@ mod tests {
             internal_prefixes: vec!["@aion/".into()],
             force: false,
             include_internal: true,
+            only_internal: false,
         };
         let cands = find_candidates(&nodes, &ds(&[("@aion/kernel", "0.5.0")]), &cfg)
             .await
@@ -367,6 +402,7 @@ mod tests {
             internal_prefixes: vec!["@aion/".into()],
             force: false,
             include_internal: true,
+            only_internal: false,
         };
         let cands = find_candidates(&nodes, &ds(&[("@aion/kernel", "0.5.0")]), &cfg)
             .await
@@ -375,6 +411,44 @@ mod tests {
             cands.is_empty(),
             "a producer in the scan keeps the module internal even with include_internal"
         );
+    }
+
+    #[tokio::test]
+    async fn only_internal_selects_first_party_instead_of_adding_to_it() {
+        // include_internal ADDS internal to the external set; only_internal
+        // SELECTS it. The difference is a change carrying 10 first-party bumps vs
+        // one carrying 10 + every third-party dep that drifted — a different blast
+        // radius, and usually a different reviewer.
+        let nodes = vec![node(
+            "web",
+            None,
+            vec![
+                npm_edge("@aion/kernel", "^0.1.0"),
+                npm_edge("@aws-sdk/client-s3", "^3.0.0"),
+            ],
+        )];
+        // Both targets must be OUTSIDE their caret, or the third-party one is
+        // AlreadySatisfied and the test proves nothing about filtering.
+        let ds = ds(&[("@aion/kernel", "0.5.0"), ("@aws-sdk/client-s3", "4.0.0")]);
+
+        let both = DiscoverConfig {
+            internal_prefixes: vec!["@aion/".into()],
+            force: false,
+            include_internal: true,
+            only_internal: false,
+        };
+        let cands = find_candidates(&nodes, &ds, &both).await.unwrap();
+        assert_eq!(cands.len(), 2, "include_internal reports first- AND third-party");
+
+        let only = DiscoverConfig {
+            internal_prefixes: vec!["@aion/".into()],
+            force: false,
+            include_internal: false, // implied by only_internal
+            only_internal: true,
+        };
+        let cands = find_candidates(&nodes, &ds, &only).await.unwrap();
+        assert_eq!(cands.len(), 1, "only_internal reports first-party alone");
+        assert_eq!(cands[0].module, "@aion/kernel");
     }
 
     #[tokio::test]
@@ -403,6 +477,7 @@ mod tests {
             internal_prefixes: vec!["@aion/".into()],
             force: true,
             include_internal: true,
+            only_internal: false,
         };
         let cands = find_candidates(&nodes, &ds(&[("@aion/kernel", "0.2.3")]), &cfg)
             .await
@@ -420,6 +495,7 @@ mod tests {
             internal_prefixes: vec!["@aion/".into()],
             force: true,
             include_internal: true,
+            only_internal: false,
         };
         let cands = find_candidates(&nodes, &ds(&[("@aion/app-boot", "0.3.1")]), &cfg)
             .await
@@ -443,6 +519,7 @@ mod tests {
             internal_prefixes: vec!["@aion/".into()],
             force: false,
             include_internal: true,
+            only_internal: false,
         };
         assert!(
             find_candidates(&nodes, &ds, &admitting).await.unwrap().is_empty(),
@@ -453,6 +530,7 @@ mod tests {
             internal_prefixes: vec!["@aion/".into()],
             force: true,
             include_internal: true,
+            only_internal: false,
         };
         let cands = find_candidates(&nodes, &ds, &forcing).await.unwrap();
         assert_eq!(cands.len(), 1);

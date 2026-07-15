@@ -62,7 +62,11 @@ func waveArgs(wc *wavev1.WaveCascade) []string {
 	for _, p := range wc.Spec.Scope.InternalPrefixes {
 		args = append(args, "--internal-prefix", p)
 	}
-	if wc.Spec.Policy.IncludeInternal {
+	// only-internal implies include-internal, so pass just the narrower flag —
+	// passing both is redundant and reads as if they were independent.
+	if wc.Spec.Policy.OnlyInternal {
+		args = append(args, "--only-internal")
+	} else if wc.Spec.Policy.IncludeInternal {
 		args = append(args, "--include-internal")
 	}
 	if wc.Spec.Policy.Force {

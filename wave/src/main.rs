@@ -116,6 +116,12 @@ pub struct DiscoverArgs {
     /// `0.2.3`, so only --force advances the floor (and hence the lockfile).
     #[arg(long)]
     include_internal: bool,
+    /// Report ONLY the --internal-prefix modules (implies --include-internal).
+    /// This is "bring this repo's first-party pins up to latest" without
+    /// dragging every third-party dependency into the same change — a different
+    /// blast radius, and usually a different reviewer.
+    #[arg(long)]
+    only_internal: bool,
     /// Route a scope at a private npm registry, in .npmrc's own form:
     /// `--npm-scope-registry '@aion/=https://gitlab.example.com/api/v4/groups/195/-/packages/npm'`.
     /// Repeatable. GitLab's group npm endpoint is packument-compatible, so it

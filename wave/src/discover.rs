@@ -74,7 +74,7 @@ pub async fn run(a: &DiscoverArgs) -> Result<()> {
     let datasources: Vec<Box<dyn Datasource>> =
         vec![Box::new(npm), Box::new(CargoDatasource::new(http))];
 
-    if a.include_internal && a.npm_scope_registries.is_empty() {
+    if (a.include_internal || a.only_internal) && a.npm_scope_registries.is_empty() {
         // Fail loudly rather than emit a silently-empty report: the public
         // registry 404s every first-party package, and a lookup miss is not an
         // error (it's "no info"), so the run would look clean while doing nothing.
@@ -88,6 +88,7 @@ pub async fn run(a: &DiscoverArgs) -> Result<()> {
         internal_prefixes: a.internal_prefixes.clone(),
         force: a.force,
         include_internal: a.include_internal,
+        only_internal: a.only_internal,
     };
     let candidates = find_candidates(&nodes, &datasources, &cfg).await?;
 

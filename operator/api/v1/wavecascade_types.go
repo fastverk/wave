@@ -25,9 +25,16 @@ type WaveScope struct {
 type WavePolicy struct {
 	// IncludeInternal bumps the InternalPrefixes modules too — "bring this repo's
 	// own first-party pins up to latest". A module published by one of the scanned
-	// repos stays internal regardless.
+	// repos stays internal regardless. This ADDS them to the third-party set; use
+	// OnlyInternal to select them instead.
 	// +optional
 	IncludeInternal bool `json:"includeInternal,omitempty"`
+	// OnlyInternal restricts the change to the InternalPrefixes modules (implies
+	// IncludeInternal). Usually what you want for a first-party bump: otherwise
+	// every third-party dep that happens to have drifted rides along in the same
+	// change — a different blast radius, and usually a different reviewer.
+	// +optional
+	OnlyInternal bool `json:"onlyInternal,omitempty"`
 	// Force bumps even where a caret/range already admits the latest version.
 	// Load-bearing for a catalog workspace: `^0.2.0` ADMITS 0.2.3, so without
 	// this there is nothing to do and the lockfile floor never moves.

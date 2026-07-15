@@ -154,7 +154,15 @@ spec:
                     description: |-
                       IncludeInternal bumps the InternalPrefixes modules too — "bring this repo's
                       own first-party pins up to latest". A module published by one of the scanned
-                      repos stays internal regardless.
+                      repos stays internal regardless. This ADDS them to the third-party set; use
+                      OnlyInternal to select them instead.
+                    type: boolean
+                  onlyInternal:
+                    description: |-
+                      OnlyInternal restricts the change to the InternalPrefixes modules (implies
+                      IncludeInternal). Usually what you want for a first-party bump: otherwise
+                      every third-party dep that happens to have drifted rides along in the same
+                      change — a different blast radius, and usually a different reviewer.
                     type: boolean
                 type: object
               schedule:
