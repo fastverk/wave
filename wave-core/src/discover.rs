@@ -64,6 +64,17 @@ pub struct DiscoverConfig {
     /// Force a bump even where a caret/range already admits the latest version
     /// (advance the manifest floor rather than rely on lockfile maintenance).
     pub force: bool,
+    /// Opt-in: also poll+report the modules matched by [`Self::internal_prefixes`],
+    /// i.e. bring a repo's *first-party* pins up to the latest published version.
+    ///
+    /// This deliberately relaxes only the **prefix** rule. A module published by
+    /// one of the enumerated repos stays internal regardless — that one is owned
+    /// by the cascade, and letting discovery bump it too is exactly the
+    /// double-ownership this partition exists to prevent. A prefix-matched module
+    /// with no producer in the scan has no such owner, so polling it is safe.
+    ///
+    /// Default `false` keeps discovery and the cascade disjoint, as before.
+    pub include_internal: bool,
 }
 
 /// One external-dependency update opportunity for one repo.
@@ -85,13 +96,18 @@ pub struct Candidate {
 }
 
 /// Is `module` internal — owned by the cascade, not a discovery candidate?
+///
+/// Published-by-a-scanned-repo always wins: that module has a producer in this
+/// very scan, so the cascade owns it. [`DiscoverConfig::include_internal`] only
+/// relaxes the weaker prefix rule (see that field).
 #[must_use]
 pub fn is_internal(module: &str, published: &HashSet<String>, cfg: &DiscoverConfig) -> bool {
     published.contains(module)
-        || cfg
-            .internal_prefixes
-            .iter()
-            .any(|p| module.starts_with(p.as_str()))
+        || (!cfg.include_internal
+            && cfg
+                .internal_prefixes
+                .iter()
+                .any(|p| module.starts_with(p.as_str())))
 }
 
 /// Max concurrent registry lookups. Registries (npm, crates.io sparse index)
@@ -153,6 +169,18 @@ pub async fn find_candidates(
     let mut candidates: Vec<Candidate> = Vec::new();
     for node in nodes {
         for edge in &node.edges {
+            // Same guard as the poll loop above. A non-semver spec (`catalog:`,
+            // `workspace:*`, a URL) carries no version here to compare against or
+            // rewrite — the real version lives elsewhere (pnpm's catalog block) or
+            // nowhere. This used to hold implicitly: nothing polled such a module,
+            // so the cache miss skipped it. Once a SIBLING edge polls the same
+            // module (a catalog entry and a `"dep": "catalog:"` pin name the same
+            // package), the opaque edge would ride in on that cache hit and
+            // propose rewriting `"catalog:"` into a literal version — destroying
+            // the indirection. Skip explicitly.
+            if matches!(edge.current, VersionConstraint::Other(_)) {
+                continue;
+            }
             let Some(Some(latest)) = cache.get(&(edge.kind, edge.module.clone())) else {
                 continue;
             };
@@ -300,11 +328,136 @@ mod tests {
         let cfg = DiscoverConfig {
             internal_prefixes: vec!["@aion/".into()],
             force: false,
+            include_internal: false,
         };
         let cands = find_candidates(&nodes, &ds(&[("@aion/kernel", "0.5.0")]), &cfg)
             .await
             .unwrap();
         assert!(cands.is_empty());
+    }
+
+    #[tokio::test]
+    async fn include_internal_opts_a_prefixed_module_back_in() {
+        // The same scan as above, with the opt-in: @aion/* is now a candidate —
+        // this is "bring a repo's first-party pins up to latest".
+        let nodes = vec![node("web", None, vec![npm_edge("@aion/kernel", "^0.1.0")])];
+        let cfg = DiscoverConfig {
+            internal_prefixes: vec!["@aion/".into()],
+            force: false,
+            include_internal: true,
+        };
+        let cands = find_candidates(&nodes, &ds(&[("@aion/kernel", "0.5.0")]), &cfg)
+            .await
+            .unwrap();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].module, "@aion/kernel");
+        assert_eq!(cands[0].latest, "0.5.0");
+    }
+
+    #[tokio::test]
+    async fn include_internal_still_defers_to_a_producer_in_the_scan() {
+        // include_internal relaxes only the PREFIX rule. A module published by a
+        // scanned repo is the cascade's to bump — discovery must not also claim
+        // it, or the two fight over the same manifest.
+        let nodes = vec![
+            node("kernel", Some("@aion/kernel"), vec![]),
+            node("web", None, vec![npm_edge("@aion/kernel", "^0.1.0")]),
+        ];
+        let cfg = DiscoverConfig {
+            internal_prefixes: vec!["@aion/".into()],
+            force: false,
+            include_internal: true,
+        };
+        let cands = find_candidates(&nodes, &ds(&[("@aion/kernel", "0.5.0")]), &cfg)
+            .await
+            .unwrap();
+        assert!(
+            cands.is_empty(),
+            "a producer in the scan keeps the module internal even with include_internal"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_opaque_spec_is_never_a_candidate_even_when_a_sibling_polls_it() {
+        // The pnpm-catalog shape: package.json says `"dep": "catalog:"` (opaque)
+        // while pnpm-workspace.yaml carries the real `^0.2.0`. Both edges name the
+        // SAME module, so the catalog edge causes a poll — and the opaque edge must
+        // not ride in on that cache hit. Bumping it would rewrite `"catalog:"` into
+        // a literal version and destroy the indirection.
+        let catalog_edge = DepEdge {
+            module: "@aion/kernel".into(),
+            current: VersionConstraint::parse_npm("^0.2.0"),
+            manifest_path: "pnpm-workspace.yaml".into(),
+            kind: EdgeKind::Npm,
+        };
+        let opaque_pin = DepEdge {
+            module: "@aion/kernel".into(),
+            current: VersionConstraint::parse_npm("catalog:"),
+            manifest_path: "package.json".into(),
+            kind: EdgeKind::Npm,
+        };
+        assert!(matches!(opaque_pin.current, VersionConstraint::Other(_)));
+
+        let nodes = vec![node("web", None, vec![catalog_edge, opaque_pin])];
+        let cfg = DiscoverConfig {
+            internal_prefixes: vec!["@aion/".into()],
+            force: true,
+            include_internal: true,
+        };
+        let cands = find_candidates(&nodes, &ds(&[("@aion/kernel", "0.2.3")]), &cfg)
+            .await
+            .unwrap();
+        assert_eq!(cands.len(), 1, "only the catalog edge is bumpable");
+        assert_eq!(cands[0].manifest_path, "pnpm-workspace.yaml");
+    }
+
+    #[tokio::test]
+    async fn force_does_not_propose_a_no_op_bump() {
+        // `^0.3.1` with latest 0.3.1: the floor already IS the target, so even
+        // --force has nothing to advance. Proposing it would open an empty MR.
+        let nodes = vec![node("web", None, vec![npm_edge("@aion/app-boot", "^0.3.1")])];
+        let cfg = DiscoverConfig {
+            internal_prefixes: vec!["@aion/".into()],
+            force: true,
+            include_internal: true,
+        };
+        let cands = find_candidates(&nodes, &ds(&[("@aion/app-boot", "0.3.1")]), &cfg)
+            .await
+            .unwrap();
+        assert!(cands.is_empty(), "no-op bump must not be a candidate");
+    }
+
+    #[tokio::test]
+    async fn include_internal_with_force_advances_an_admitting_caret() {
+        // The aion shape: catalog pins ^0.2.0, registry has 0.2.3. The caret
+        // already ADMITS 0.2.3, so only `force` makes it a candidate — that's how
+        // the manifest floor (and hence the lockfile) actually moves.
+        let nodes = vec![node(
+            "web",
+            None,
+            vec![npm_edge("@aion/http-utils", "^0.2.0")],
+        )];
+        let ds = ds(&[("@aion/http-utils", "0.2.3")]);
+
+        let admitting = DiscoverConfig {
+            internal_prefixes: vec!["@aion/".into()],
+            force: false,
+            include_internal: true,
+        };
+        assert!(
+            find_candidates(&nodes, &ds, &admitting).await.unwrap().is_empty(),
+            "^0.2.0 admits 0.2.3, so without force there is nothing to do"
+        );
+
+        let forcing = DiscoverConfig {
+            internal_prefixes: vec!["@aion/".into()],
+            force: true,
+            include_internal: true,
+        };
+        let cands = find_candidates(&nodes, &ds, &forcing).await.unwrap();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].latest, "0.2.3");
+        assert_eq!(cands[0].decision, BumpDecision::NeedsBump);
     }
 
     #[tokio::test]
