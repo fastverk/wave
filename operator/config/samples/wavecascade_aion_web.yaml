@@ -1,0 +1,63 @@
+# Bring aion/web's own @aion/* pins up to the latest published version.
+#
+# Why this shape, and not a recursive cascade across aion/core → modules → web:
+# the aion repos publish via an IDEMPOTENT `publish.mjs` ("a merge that doesn't
+# bump a version is a no-op") and versions are hand-bumped per package by the
+# author. A dep-only bump therefore never republishes, so a cascade would park at
+# MERGED→PUBLISHED forever. It is also unnecessary — a pnpm catalog is one flat,
+# repo-wide version map, so aion/web pins every @aion/* itself and inherits
+# nothing transitively. One change on one repo IS "all its deps to latest".
+#
+# Start with dryRun to see the plan:
+#   kubectl -n fastverk annotate wavecascade aion-web-internal-bump \
+#     fastverk.savvifi.com/wave-now="$(date +%s)" --overwrite
+#   kubectl -n fastverk logs -l fastverk.savvifi.com/cascade=aion-web-internal-bump
+apiVersion: fastverk.savvifi.com/v1
+kind: WaveCascade
+metadata:
+  name: aion-web-internal-bump
+  namespace: fastverk
+spec:
+  objective: "aion/web internal deps → latest"
+  forge: gitlab
+  host: gitlab.savvifi.com
+  scope:
+    group: aion
+    repos: [web]
+    # @aion/* is first-party. By default that means "skip — the cascade owns it";
+    # policy.includeInternal below flips it to "bump it".
+    internalPrefixes: ["@aion/"]
+  policy:
+    # ONLY the @aion/* modules. includeInternal would ADD them to the third-party
+    # set, so the same change would also carry ~49 @aws-sdk/etc bumps — a
+    # different blast radius and a different reviewer.
+    onlyInternal: true
+    # force: false ⇒ only the pins the caret genuinely CANNOT satisfy (10 on
+    # aion/web today). With force it also advances floors the caret already
+    # admits (^0.2.0 → 0.2.3), which the lockfile picks up on install anyway —
+    # 125 more entries of mostly-noise. Start narrow.
+    force: false
+    # Gated: open the change and hold it for review. Switch to Open only once a
+    # run has been eyeballed — see the warning below.
+    autonomy: Gated
+    # Start here. Reports the plan as JSON and opens nothing.
+    dryRun: true
+  # Required with includeInternal: @aion/* lives in GitLab's per-project npm
+  # registry, and the public registry 404s every one of them. A lookup miss is
+  # "no info", not an error — so without this the run looks clean while doing
+  # nothing. Group 195 = @aion (from aion/web's .npmrc).
+  npmScopeRegistries:
+    - scope: "@aion/"
+      registry: "https://gitlab.savvifi.com/api/v4/groups/195/-/packages/npm"
+  # Stable on purpose: create_branch/open_change are idempotent, so a re-run
+  # refreshes THIS change with newer versions rather than opening another.
+  branch: wave/dep-bumps
+  # Weekly. Omit for on-demand only.
+  schedule: "0 6 * * 1"
+  paused: false
+---
+# ⚠️ Before turning off dryRun, know what you're pointing at. A --force run over
+# aion/web currently yields ~184 candidates, including jumps the caret does NOT
+# admit (@aion/api-procedure-core ^0.2.0 → 0.7.2, @aion/aion-cli ^0.2.0 → 0.3.2).
+# That is very unlikely to build in one change. The narrow first move is
+# force: false — only the pins the caret genuinely cannot satisfy.

@@ -14,6 +14,7 @@ mod datasource;
 mod discover;
 mod enumerate;
 mod forge_factory;
+mod open;
 mod render;
 
 use std::path::{Path, PathBuf};
@@ -106,6 +107,43 @@ pub struct DiscoverArgs {
     /// Report bumps even where a caret/range already admits the latest version.
     #[arg(long)]
     force: bool,
+    /// Also report the --internal-prefix modules, i.e. bring this repo's
+    /// FIRST-PARTY pins up to the latest published version. Off by default, which
+    /// keeps discovery and the cascade disjoint. A module published by one of the
+    /// scanned repos stays the cascade's regardless.
+    ///
+    /// Pair with --force when the pins are carets: `^0.2.0` already admits
+    /// `0.2.3`, so only --force advances the floor (and hence the lockfile).
+    #[arg(long)]
+    include_internal: bool,
+    /// Report ONLY the --internal-prefix modules (implies --include-internal).
+    /// This is "bring this repo's first-party pins up to latest" without
+    /// dragging every third-party dependency into the same change — a different
+    /// blast radius, and usually a different reviewer.
+    #[arg(long)]
+    only_internal: bool,
+    /// Route a scope at a private npm registry, in .npmrc's own form:
+    /// `--npm-scope-registry '@aion/=https://gitlab.example.com/api/v4/groups/195/-/packages/npm'`.
+    /// Repeatable. GitLab's group npm endpoint is packument-compatible, so it
+    /// needs no separate datasource. Authorized by $GITLAB_TOKEN / $FORGE_TOKEN.
+    #[arg(long = "npm-scope-registry")]
+    npm_scope_registries: Vec<String>,
+    /// WRITE: open (or refresh) one change per repo carrying its bumps. Without
+    /// this, discover only reports. The branch is stable, so a re-run refreshes
+    /// the same change rather than opening another.
+    #[arg(long)]
+    open: bool,
+    /// The branch `--open` writes to. Stable on purpose — see --open.
+    #[arg(long, default_value = "wave/dep-bumps")]
+    open_branch: String,
+    /// With --open, arm merge-when-pipeline-succeeds. Off by default: the change
+    /// is opened and held for review.
+    #[arg(long)]
+    auto_merge: bool,
+    /// Emit the candidates as JSON instead of the text report (read-only; a
+    /// machine-readable plan to inspect before `--open`).
+    #[arg(long)]
+    json: bool,
 }
 
 #[tokio::main]

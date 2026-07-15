@@ -1,0 +1,45 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wave-operator
+rules:
+- apiGroups:
+  - batch
+  resources:
+  - cronjobs
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - fastverk.savvifi.com
+  resources:
+  - wavecascades
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - fastverk.savvifi.com
+  resources:
+  - wavecascades/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - fastverk.savvifi.com
+  resources:
+  - wavecascades/status
+  verbs:
+  - get
+  - patch
+  - update

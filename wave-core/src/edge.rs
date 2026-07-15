@@ -164,6 +164,11 @@ pub fn decide(
         Caret(v) => {
             if v > target {
                 BumpDecision::Conflict(format!("caret floor {v} > target {target}"))
+            } else if v == target {
+                // The floor already IS the target. `bump_satisfied` advances a
+                // floor; there is nothing here to advance, and rewriting `^X` to
+                // `^X` is a no-op that would open an empty MR.
+                BumpDecision::AlreadySatisfied
             } else if current.admits(target) && !bump_satisfied {
                 BumpDecision::AlreadySatisfied
             } else {

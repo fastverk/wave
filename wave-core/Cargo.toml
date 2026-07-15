@@ -15,7 +15,10 @@ path = "src/lib.rs"
 anyhow = "1.0"
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# raw_value: RawValue hands back a section's VERBATIM source text, which is how
+# the npm provider scopes a bump to the dependency sections without hand-rolling
+# a JSON scanner (see NpmProvider::section_span).
+serde_json = { version = "1.0", features = ["raw_value"] }
 toml = "0.8"
 semver = "1"
 regex = "1"

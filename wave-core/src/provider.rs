@@ -43,13 +43,17 @@ impl ProviderChain {
         Self { providers }
     }
 
-    /// The default chain: Bazel, then npm, then Cargo.
+    /// The default chain: Bazel, then npm, then Cargo, then the pnpm catalog.
+    /// Callers union the edges from every manifest a repo carries (see
+    /// `node_for`), so a pnpm catalog workspace contributes both its
+    /// `package.json` pins and its `pnpm-workspace.yaml` catalog entries.
     #[must_use]
     pub fn default_chain() -> Self {
         Self::new(vec![
             Box::new(BazelDepProvider::new()),
             Box::new(NpmProvider::new()),
             Box::new(CargoProvider::new()),
+            Box::new(PnpmCatalogProvider::new()),
         ])
     }
 
@@ -183,6 +187,35 @@ impl NpmProvider {
             .expect("valid npm dependency regex"),
         }
     }
+
+    /// Byte range of top-level key `name`'s value, or `None` if absent.
+    ///
+    /// This is what keeps [`GraphProvider::bump`] honest: `parse_edges` reads
+    /// only [`Self::SECTIONS`], so a bump must rewrite only those. A whole-file
+    /// regex also hits `pnpm.overrides` / `resolutions` — which are deliberate
+    /// resolution pins, not dependency declarations. Rewriting the handful that
+    /// happen to share a name with a dependency leaves the rest of that map at
+    /// its old versions (an INCONSISTENT override set) and silently moves a pin
+    /// someone set on purpose.
+    ///
+    /// **Why not just parse → mutate → serialize?** Because a round-trip reflows
+    /// the file. `package.json` is 2-space-canonical *often* but not always (4
+    /// spaces, tabs, no trailing newline), and when it isn't, the "bump one dep"
+    /// change silently becomes a whole-file reformat — an unreviewable diff and a
+    /// conflict magnet, and it fails quietly. Surgery on the original bytes can't
+    /// have that failure mode.
+    ///
+    /// **Why not hand-roll a scanner?** No need: `RawValue` hands back the
+    /// section's VERBATIM source text, so serde does all the parsing (escapes,
+    /// nesting, unicode) and locating it is one substring search.
+    fn section_span(text: &str, name: &str) -> Option<(usize, usize)> {
+        let doc: std::collections::BTreeMap<&str, &serde_json::value::RawValue> =
+            serde_json::from_str(text).ok()?;
+        let raw = doc.get(name)?.get();
+        // `raw` is a verbatim slice of `text`, so it is present by construction.
+        let start = text.find(raw)?;
+        Some((start, start + raw.len()))
+    }
 }
 
 impl Default for NpmProvider {
@@ -236,16 +269,37 @@ impl GraphProvider for NpmProvider {
         // Rewrite only the entry whose key matches `module`, keeping any
         // caret/tilde operator. Non-semver specs never match (the `ver` group is
         // anchored on a leading digit).
+        //
+        // Scoped to the SECTIONS parse_edges reads. A whole-file pass would also
+        // rewrite `pnpm.overrides` / `resolutions`, whose entries are resolution
+        // pins rather than declarations — see top_level_object_span. Sections are
+        // rewritten back-to-front so earlier spans keep their offsets.
+        let mut spans: Vec<(usize, usize)> = Self::SECTIONS
+            .iter()
+            .filter_map(|s| Self::section_span(text, s))
+            .collect();
+        spans.sort_by_key(|(start, _)| *start);
+
+        let mut out = text.to_string();
         let mut changed = false;
-        let out = self.dep_re.replace_all(text, |c: &Captures| {
-            if &c["name"] == module {
+        for (start, end) in spans.into_iter().rev() {
+            let section = &out[start..end];
+            let mut section_changed = false;
+            let next = self.dep_re.replace_all(section, |c: &Captures| {
+                if &c["name"] == module {
+                    section_changed = true;
+                    format!("{}{}{target}{}", &c["head"], &c["op"], &c["tail"])
+                } else {
+                    c[0].to_string()
+                }
+            });
+            if section_changed {
+                let rewritten = next.into_owned();
+                out.replace_range(start..end, &rewritten);
                 changed = true;
-                format!("{}{}{target}{}", &c["head"], &c["op"], &c["tail"])
-            } else {
-                c[0].to_string()
             }
-        });
-        (out.into_owned(), changed)
+        }
+        (out, changed)
     }
 }
 
@@ -366,6 +420,158 @@ impl GraphProvider for CargoProvider {
             }
         });
         (out.into_owned(), changed)
+    }
+}
+
+// ─── pnpm catalog ───────────────────────────────────────────────────────
+
+/// Reads pnpm's `catalog:` block in `pnpm-workspace.yaml` — the repo-wide
+/// version map that `"dep": "catalog:"` entries in each `package.json` resolve
+/// through. In a catalog workspace this file, not `package.json`, is where the
+/// version actually lives, so it is the file a bump must rewrite. (`NpmProvider`
+/// correctly ignores those entries: `catalog:` parses to
+/// [`VersionConstraint::Other`], which discovery skips.)
+///
+/// The workspace root publishes nothing, so `published_name`/`published_version`
+/// are always `None` — this provider contributes edges only.
+///
+/// Only the default `catalog:` block is read; pnpm's named `catalogs:` (plural)
+/// blocks are deliberately not matched (`catalogs:` is not the `catalog:` header).
+pub struct PnpmCatalogProvider {
+    /// One `  '<name>': <op><ver>` catalog entry. `head` runs from the line's
+    /// indent through any quote + caret/tilde and `rest` carries any trailing
+    /// spacing/comment, so a rewrite that keeps `head`/`tail`/`rest` preserves
+    /// the file's quoting style, operator, and end-of-line comment verbatim.
+    /// `ver` is anchored on a leading digit, so `catalog:`-style or non-version
+    /// values never match.
+    entry_re: Regex,
+}
+
+impl PnpmCatalogProvider {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entry_re: Regex::new(
+                r#"(?m)^(?P<head>[ \t]+(?P<name>'[^']+'|"[^"]+"|[A-Za-z0-9@._/-]+)[ \t]*:[ \t]*(?P<vq>['"]?)(?P<op>[\^~]?))(?P<ver>[0-9][^'"\s#]*)(?P<tail>['"]?)(?P<rest>[ \t]*(?:#[^\n]*)?)$"#,
+            )
+            .expect("valid pnpm catalog entry regex"),
+        }
+    }
+
+    /// Byte range of the default `catalog:` block's body. The block runs from the
+    /// line after the header to the next line at column 0 that is neither blank
+    /// nor a comment (`packages:`, `catalogs:`, …) — so entries are only ever
+    /// read or rewritten inside it, never in `packages:` or anywhere else.
+    fn catalog_span(text: &str) -> Option<(usize, usize)> {
+        let mut offset = 0usize;
+        let mut start: Option<usize> = None;
+        for line in text.split_inclusive('\n') {
+            let len = line.len();
+            let l = line.trim_end_matches(['\n', '\r']);
+            match start {
+                None => {
+                    if Self::is_catalog_header(l) {
+                        start = Some(offset + len);
+                    }
+                }
+                Some(s) => {
+                    let ends_block = !l.trim().is_empty()
+                        && !l.starts_with([' ', '\t'])
+                        && !l.trim_start().starts_with('#');
+                    if ends_block {
+                        return Some((s, offset));
+                    }
+                }
+            }
+            offset += len;
+        }
+        start.map(|s| (s, text.len()))
+    }
+
+    /// A bare `catalog:` header at column 0 (trailing comment allowed). Does not
+    /// match `catalogs:` — pnpm's named-catalog block, a different shape.
+    fn is_catalog_header(line: &str) -> bool {
+        line.strip_prefix("catalog:")
+            .is_some_and(|rest| rest.trim().is_empty() || rest.trim_start().starts_with('#'))
+    }
+
+    /// A YAML scalar with its surrounding quotes removed, if any.
+    fn unquote(s: &str) -> &str {
+        let b = s.as_bytes();
+        let quoted = b.len() >= 2
+            && ((b[0] == b'\'' && b[b.len() - 1] == b'\'')
+                || (b[0] == b'"' && b[b.len() - 1] == b'"'));
+        if quoted {
+            &s[1..s.len() - 1]
+        } else {
+            s
+        }
+    }
+}
+
+impl Default for PnpmCatalogProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphProvider for PnpmCatalogProvider {
+    fn manifest_name(&self) -> &'static str {
+        "pnpm-workspace.yaml"
+    }
+    fn kind(&self) -> EdgeKind {
+        EdgeKind::Npm
+    }
+
+    /// A workspace root publishes nothing.
+    fn published_name(&self, _text: &str) -> Option<String> {
+        None
+    }
+    /// A workspace root publishes nothing.
+    fn published_version(&self, _text: &str) -> Option<String> {
+        None
+    }
+
+    fn parse_edges(&self, text: &str) -> Option<Vec<DepEdge>> {
+        // No `catalog:` block ⇒ not a catalog workspace; fall through the chain
+        // (a pnpm-workspace.yaml carrying only `packages:` yields no edges).
+        let (start, end) = Self::catalog_span(text)?;
+        let edges = self
+            .entry_re
+            .captures_iter(&text[start..end])
+            .map(|c| DepEdge {
+                module: Self::unquote(&c["name"]).to_string(),
+                current: VersionConstraint::parse_npm(&format!("{}{}", &c["op"], &c["ver"])),
+                manifest_path: self.manifest_name().to_string(),
+                kind: EdgeKind::Npm,
+            })
+            .collect();
+        Some(edges)
+    }
+
+    fn bump(&self, text: &str, module: &str, target: &str) -> (String, bool) {
+        let Some((start, end)) = Self::catalog_span(text) else {
+            return (text.to_string(), false);
+        };
+        let mut changed = false;
+        let body = self.entry_re.replace_all(&text[start..end], |c: &Captures| {
+            if Self::unquote(&c["name"]) == module {
+                changed = true;
+                // `rest` is re-emitted, not dropped: the match consumes any
+                // end-of-line comment, so replacing without it silently eats
+                // whatever the entry documented.
+                format!("{}{target}{}{}", &c["head"], &c["tail"], &c["rest"])
+            } else {
+                c[0].to_string()
+            }
+        });
+        if !changed {
+            return (text.to_string(), false);
+        }
+        (
+            format!("{}{}{}", &text[..start], body, &text[end..]),
+            true,
+        )
     }
 }
 
@@ -503,5 +709,225 @@ tokio = { version = "1.40", features = ["full"] }
         assert!(changed);
         assert!(out.contains(r#"anyhow = "1.1.0""#));
         assert!(out.contains(r#"prost-build = "0.13""#)); // neighbor untouched
+    }
+
+    // Shaped after aion/web: the SAME module appears in `dependencies` (a
+    // declaration wave owns) and in `pnpm.overrides` (a deliberate resolution
+    // pin it does not).
+    const PACKAGE_JSON_WITH_OVERRIDES: &str = r#"{
+  "name": "@savvi-studio/web",
+  "private": true,
+  "dependencies": {
+    "@aion/graph-module-compile": "^0.5.1",
+    "@aion/kernel": "catalog:",
+    "next": "15.0.0"
+  },
+  "devDependencies": {
+    "@aion/graph-module-compile": "^0.5.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "@aion/graph-module-compile": "0.6.2",
+      "@aion/db-pglite": "0.2.1"
+    }
+  }
+}
+"#;
+
+    #[test]
+    fn npm_bump_never_touches_pnpm_overrides() {
+        // Regression: parse_edges is section-scoped (serde), but bump used to run
+        // its regex over the WHOLE file, so it silently rewrote pnpm.overrides
+        // too. That moves a pin someone set deliberately, and — since only the
+        // entries that happen to share a name with a dependency get moved —
+        // leaves the rest of the override map at its old versions, i.e. an
+        // inconsistent resolution set. Caught by a real MR on aion/web.
+        let p = NpmProvider::new();
+        let (out, changed) = p.bump(PACKAGE_JSON_WITH_OVERRIDES, "@aion/graph-module-compile", "0.6.3");
+        assert!(changed);
+        // Declarations bumped, operator preserved.
+        assert!(out.contains(r#""@aion/graph-module-compile": "^0.6.3""#));
+        assert_eq!(
+            out.matches(r#""@aion/graph-module-compile": "^0.6.3""#).count(),
+            2,
+            "both dependencies and devDependencies are declarations"
+        );
+        // The override is UNTOUCHED.
+        assert!(
+            out.contains(r#""@aion/graph-module-compile": "0.6.2""#),
+            "pnpm.overrides must not be rewritten:\n{out}"
+        );
+        assert!(out.contains(r#""@aion/db-pglite": "0.2.1""#));
+        // Neighbors intact.
+        assert!(out.contains(r#""next": "15.0.0""#));
+        assert!(out.contains(r#""@aion/kernel": "catalog:""#));
+    }
+
+    #[test]
+    fn npm_bump_still_reaches_every_declaration_section() {
+        let p = NpmProvider::new();
+        let (out, _) = p.bump(PACKAGE_JSON_WITH_OVERRIDES, "next", "15.1.0");
+        assert!(out.contains(r#""next": "15.1.0""#));
+    }
+
+    #[test]
+    fn npm_parse_edges_ignores_overrides_too() {
+        // parse_edges was always correct — this pins the invariant that bump now
+        // matches it, so the two can't drift apart again.
+        let p = NpmProvider::new();
+        let edges = p.parse_edges(PACKAGE_JSON_WITH_OVERRIDES).unwrap();
+        assert_eq!(
+            edges.iter().filter(|e| e.module == "@aion/db-pglite").count(),
+            0,
+            "an override is not a declared edge"
+        );
+    }
+
+    // ── pnpm catalog ────────────────────────────────────────────────────
+    //
+    // Shaped after a real catalog workspace: a `packages:` block that must never
+    // be touched, a load-bearing comment inside `catalog:`, mixed first-party and
+    // third-party entries, and a trailing block after the catalog.
+
+    const PNPM_WORKSPACE: &str = r#"# Collapse peer-dependency variants.
+dedupePeerDependents: true
+
+packages:
+  - packages/kernel
+  - packages/logger
+
+catalog:
+  # @aion/* framework packages — single source of truth for the published
+  # framework version (all bumped together on release).
+  '@aion/kernel': ^0.2.0
+  '@aion/http-utils': ^0.2.0
+  '@aws-sdk/client-s3': ^3.1030.0
+  zod: ^3.23.8
+
+onlyBuiltDependencies:
+  - esbuild
+"#;
+
+    #[test]
+    fn pnpm_catalog_parses_entries_and_publishes_nothing() {
+        let p = PnpmCatalogProvider::new();
+        assert_eq!(p.published_name(PNPM_WORKSPACE), None);
+        assert_eq!(p.published_version(PNPM_WORKSPACE), None);
+
+        let edges = p.parse_edges(PNPM_WORKSPACE).unwrap();
+        let names: Vec<_> = edges.iter().map(|e| e.module.as_str()).collect();
+        // Quotes stripped; the `packages:` list + `onlyBuiltDependencies:` block
+        // are outside the catalog span and contribute nothing.
+        assert_eq!(
+            names,
+            ["@aion/kernel", "@aion/http-utils", "@aws-sdk/client-s3", "zod"]
+        );
+        assert!(edges.iter().all(|e| e.kind == EdgeKind::Npm));
+        assert!(edges
+            .iter()
+            .all(|e| e.manifest_path == "pnpm-workspace.yaml"));
+        assert_eq!(
+            edges[0].current,
+            VersionConstraint::Caret(semver::Version::new(0, 2, 0))
+        );
+    }
+
+    #[test]
+    fn pnpm_catalog_bump_is_surgical() {
+        let p = PnpmCatalogProvider::new();
+        let (out, changed) = p.bump(PNPM_WORKSPACE, "@aion/http-utils", "0.2.3");
+        assert!(changed);
+        // Rewrote the target, preserving quote style + the caret operator.
+        assert!(out.contains("'@aion/http-utils': ^0.2.3"));
+        // Neighbors untouched.
+        assert!(out.contains("'@aion/kernel': ^0.2.0"));
+        assert!(out.contains("zod: ^3.23.8"));
+        // The comment documenting the framework-version invariant SURVIVES — a
+        // YAML round-trip would eat it. This is the whole point of regex-surgery.
+        assert!(out.contains("# @aion/* framework packages — single source of truth"));
+        // Structure outside the catalog is byte-identical.
+        assert!(out.contains("  - packages/kernel"));
+        assert!(out.contains("dedupePeerDependents: true"));
+        assert!(out.contains("onlyBuiltDependencies:"));
+        // Nothing else moved.
+        assert_eq!(out.lines().count(), PNPM_WORKSPACE.lines().count());
+    }
+
+    #[test]
+    fn pnpm_catalog_bump_unknown_module_is_a_noop() {
+        let p = PnpmCatalogProvider::new();
+        let (out, changed) = p.bump(PNPM_WORKSPACE, "@aion/not-here", "9.9.9");
+        assert!(!changed);
+        assert_eq!(out, PNPM_WORKSPACE);
+    }
+
+    #[test]
+    fn pnpm_catalog_never_rewrites_outside_the_catalog_block() {
+        // A `packages:` entry that looks superficially like an entry with a
+        // version must not be reachable — the span guard, not the regex, is what
+        // protects it.
+        const TRICKY: &str = r#"packages:
+  foo: ^1.0.0
+
+catalog:
+  foo: ^1.0.0
+"#;
+        let p = PnpmCatalogProvider::new();
+        let edges = p.parse_edges(TRICKY).unwrap();
+        assert_eq!(edges.len(), 1, "only the catalog's `foo` is an edge");
+        let (out, changed) = p.bump(TRICKY, "foo", "2.0.0");
+        assert!(changed);
+        assert_eq!(
+            out,
+            "packages:\n  foo: ^1.0.0\n\ncatalog:\n  foo: ^2.0.0\n",
+            "the packages: entry is untouched"
+        );
+    }
+
+    #[test]
+    fn pnpm_catalog_absent_falls_through_the_chain() {
+        // A workspace with no catalog: yields None so the chain moves on, rather
+        // than claiming the repo with an empty edge set.
+        const NO_CATALOG: &str = "packages:\n  - packages/a\n";
+        assert!(PnpmCatalogProvider::new().parse_edges(NO_CATALOG).is_none());
+        // `catalogs:` (pnpm's NAMED catalogs) is a different block and must not
+        // be mistaken for the default one.
+        const NAMED_ONLY: &str = "catalogs:\n  react17:\n    react: ^17.0.0\n";
+        assert!(PnpmCatalogProvider::new().parse_edges(NAMED_ONLY).is_none());
+    }
+
+    #[test]
+    fn pnpm_catalog_quoting_styles_and_trailing_comments() {
+        const STYLES: &str = r#"catalog:
+  "@scope/dq": ~1.2.3
+  '@scope/sq': ^1.0.0
+  bare: 2.0.0
+  quoted-val: '^3.0.0'
+  with-comment: ^4.0.0 # pinned deliberately
+"#;
+        let p = PnpmCatalogProvider::new();
+        let edges = p.parse_edges(STYLES).unwrap();
+        assert_eq!(
+            edges.iter().map(|e| e.module.as_str()).collect::<Vec<_>>(),
+            ["@scope/dq", "@scope/sq", "bare", "quoted-val", "with-comment"]
+        );
+        // Each rewrite preserves that entry's own quoting + operator.
+        assert!(p.bump(STYLES, "@scope/dq", "1.2.4").0.contains(r#""@scope/dq": ~1.2.4"#));
+        assert!(p.bump(STYLES, "bare", "2.1.0").0.contains("bare: 2.1.0"));
+        assert!(p.bump(STYLES, "quoted-val", "3.1.0").0.contains("quoted-val: '^3.1.0'"));
+        let (out, _) = p.bump(STYLES, "with-comment", "4.1.0");
+        assert!(
+            out.contains("with-comment: ^4.1.0 # pinned deliberately"),
+            "trailing comment survives: {out}"
+        );
+    }
+
+    #[test]
+    fn pnpm_catalog_is_in_the_default_chain() {
+        let chain = ProviderChain::default_chain();
+        let p = chain
+            .for_manifest("pnpm-workspace.yaml")
+            .expect("pnpm catalog provider is routable by manifest name");
+        assert_eq!(p.kind(), EdgeKind::Npm);
     }
 }

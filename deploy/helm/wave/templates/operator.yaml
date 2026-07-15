@@ -1,0 +1,133 @@
+{{- if .Values.operator.enabled }}
+{{/*
+  wave-operator — reconciles WaveCascade CRs into the run Jobs the wave CLI
+  performs. Inert until a WaveCascade exists.
+
+  This supersedes the discover/reconcile CronJobs for anything CR-driven: the
+  operator renders the SAME `wave discover …` argv from a CR, but adds a
+  named/repeatable config, an on-demand trigger, and a status. The legacy
+  CronJobs stay for the untyped org-wide external scan (values.discover.*), so
+  the two can coexist while that migrates.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "wave.fullname" . }}-operator
+  labels:
+    {{- include "wave.labels" . | nindent 4 }}
+  {{- with .Values.operator.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "wave.fullname" . }}-operator
+  labels:
+    {{- include "wave.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["fastverk.savvifi.com"]
+    resources: ["wavecascades"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["fastverk.savvifi.com"]
+    resources: ["wavecascades/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["fastverk.savvifi.com"]
+    resources: ["wavecascades/finalizers"]
+    verbs: ["update"]
+  # The delegated work: the operator owns Jobs (on-demand) + CronJobs (schedule).
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Leader election.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "wave.fullname" . }}-operator
+  labels:
+    {{- include "wave.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "wave.fullname" . }}-operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "wave.fullname" . }}-operator
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "wave.fullname" . }}-operator
+  labels:
+    {{- include "wave.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "wave.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        {{- include "wave.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: {{ include "wave.fullname" . }}-operator
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: operator
+          image: "{{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          args:
+            - --leader-elect
+          env:
+            # The wave CLI image the run Jobs use. NOT the operator's own image:
+            # the operator is Go, the engine is Rust.
+            - name: WAVE_IMAGE
+              value: {{ include "wave.image" . | quote }}
+            # The forge credential (values.token, as the cronjobs use). NOTE:
+            # opening a change is a WRITE, so this needs `api` scope — a read_api
+            # token reports fine and then 403s on --open.
+            - name: WAVE_FORGE_TOKEN_SECRET
+              value: {{ .Values.token.existingSecret | quote }}
+            - name: WAVE_FORGE_TOKEN_KEY
+              value: {{ .Values.token.secretKey | quote }}
+            - name: WAVE_JOB_SERVICE_ACCOUNT
+              value: {{ include "wave.serviceAccountName" . | quote }}
+            {{- if .Values.operator.stateClaim }}
+            # Mount the durable WaveStore into run Jobs. Optional: the flat bump
+            # path keeps no cross-run state. It is ReadWriteOnce/single-writer,
+            # which is why the operator enforces single-flight.
+            - name: WAVE_STATE_CLAIM
+              value: {{ .Values.operator.stateClaim | quote }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.operator.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

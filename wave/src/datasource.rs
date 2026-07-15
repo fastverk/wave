@@ -10,14 +10,37 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use wave_core::{Datasource, EdgeKind, VersionInfo};
 
-/// The public npm registry — reads `dist-tags.latest` from a package's
-/// (abbreviated) packument. Internal scopes (`@aion/`, `@savvi-studio/`) are
-/// filtered out upstream by the discovery partition, so this never has to reach
-/// a private GitLab registry.
+/// An npm registry — reads `dist-tags.latest` from a package's (abbreviated)
+/// packument.
+///
+/// Defaults to the public registry. Scope overrides mirror `.npmrc`'s own
+/// `@scope:registry=…` model, so a first-party scope can resolve from a private
+/// registry: GitLab's group npm endpoint
+/// (`/api/v4/groups/<id>/-/packages/npm/`) is packument-compatible, serving the
+/// same `dist-tags`, so it needs only a base URL + a token — no separate
+/// datasource. Scope routing (rather than a second `EdgeKind::Npm` datasource)
+/// is required because discovery picks a datasource by `kind()` alone, so a
+/// second npm datasource would shadow this one for *every* package.
+///
+/// Only reachable for first-party scopes when
+/// [`DiscoverConfig::include_internal`](wave_core::DiscoverConfig) is set;
+/// otherwise the partition filters them out before any lookup.
 pub struct NpmDatasource {
     http: reqwest::Client,
     /// Registry base URL (no trailing slash). Default: `https://registry.npmjs.org`.
     registry: String,
+    /// Per-scope registry overrides, longest-prefix-first.
+    scopes: Vec<ScopeRegistry>,
+}
+
+/// One `@scope:registry=…` override, with the token that authorizes it.
+struct ScopeRegistry {
+    /// Scope prefix including the trailing slash (e.g. `@aion/`).
+    prefix: String,
+    /// Registry base URL (no trailing slash).
+    registry: String,
+    /// GitLab PAT (`read_api`) sent as `PRIVATE-TOKEN`, when the registry needs one.
+    token: Option<String>,
 }
 
 impl NpmDatasource {
@@ -26,7 +49,43 @@ impl NpmDatasource {
         Self {
             http,
             registry: "https://registry.npmjs.org".to_string(),
+            scopes: Vec::new(),
         }
+    }
+
+    /// Route `prefix`-scoped packages at `registry` instead of the default.
+    /// `prefix` is normalized to end in `/` so `@aion` and `@aion/` behave alike
+    /// (and `@aion` can never match `@aion-other/…`).
+    #[must_use]
+    pub fn with_scope(
+        mut self,
+        prefix: impl Into<String>,
+        registry: impl Into<String>,
+        token: Option<String>,
+    ) -> Self {
+        let mut prefix = prefix.into();
+        if !prefix.ends_with('/') {
+            prefix.push('/');
+        }
+        self.scopes.push(ScopeRegistry {
+            prefix,
+            registry: registry.into().trim_end_matches('/').to_string(),
+            token,
+        });
+        // Longest prefix first, so a more specific scope override wins.
+        self.scopes
+            .sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+        self
+    }
+
+    /// The registry + token that should serve `package`.
+    fn route(&self, package: &str) -> (&str, Option<&str>) {
+        self.scopes
+            .iter()
+            .find(|s| package.starts_with(&s.prefix))
+            .map_or((self.registry.as_str(), None), |s| {
+                (s.registry.as_str(), s.token.as_deref())
+            })
     }
 }
 
@@ -56,13 +115,18 @@ impl Datasource for NpmDatasource {
         } else {
             package.to_string()
         };
-        let url = format!("{}/{path}", self.registry);
-        let resp = self
+        let (registry, token) = self.route(package);
+        let url = format!("{registry}/{path}");
+        let mut req = self
             .http
             .get(&url)
             // Abbreviated metadata: same dist-tags, far smaller than the full
             // packument (which carries every version's manifest).
-            .header("Accept", "application/vnd.npm.install-v1+json")
+            .header("Accept", "application/vnd.npm.install-v1+json");
+        if let Some(token) = token {
+            req = req.header("PRIVATE-TOKEN", token);
+        }
+        let resp = req
             .send()
             .await
             .with_context(|| format!("GET {url}"))?;

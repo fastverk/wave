@@ -49,6 +49,12 @@ crate.spec(
     version = "1.0",
 )
 crate.spec(
+    # raw_value: RawValue hands back a manifest section's VERBATIM source text,
+    # which is how NpmProvider scopes a bump to the dependency sections without
+    # hand-rolling a JSON scanner. Must be kept in step with wave-core's
+    # Cargo.toml — this from_specs list, not that Cargo.toml, is what Bazel
+    # resolves, so a feature added only there builds under cargo and fails here.
+    features = ["raw_value"],
     package = "serde_json",
     version = "1.0",
 )
