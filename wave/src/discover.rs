@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use wave_core::{find_candidates, Datasource, DiscoverConfig, ProviderChain};
 
 use crate::datasource::{CargoDatasource, NpmDatasource};
-use crate::{enumerate, forge_factory, render, DiscoverArgs};
+use crate::{enumerate, forge_factory, open, render, DiscoverArgs};
 
 /// Parse a `--npm-scope-registry '@scope/=https://host/path'` pair.
 fn parse_scope_registry(spec: &str) -> Result<(String, String)> {
@@ -90,6 +90,29 @@ pub async fn run(a: &DiscoverArgs) -> Result<()> {
         include_internal: a.include_internal,
     };
     let candidates = find_candidates(&nodes, &datasources, &cfg).await?;
-    print!("{}", render::render_discovery(&candidates));
+
+    if a.json {
+        println!("{}", render::render_discovery_json(&candidates)?);
+    } else {
+        print!("{}", render::render_discovery(&candidates));
+    }
+
+    if a.open {
+        let opened =
+            open::open_candidates(forge.as_ref(), &chain, &candidates, &a.open_branch, a.auto_merge)
+                .await?;
+        for o in &opened {
+            let verb = if o.already_existed { "refreshed" } else { "opened" };
+            println!(
+                "{verb} {} ({} bump(s)): {}",
+                wave_core::repo_key(&o.repo),
+                o.bumped.len(),
+                o.url
+            );
+        }
+        if opened.is_empty() {
+            println!("nothing to open — every candidate is already on the branch");
+        }
+    }
     Ok(())
 }

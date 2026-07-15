@@ -175,6 +175,31 @@ pub fn render_trace(trace: &pb::WaveTrace) -> String {
 
 /// Render the discovery report: external out-of-date deps grouped by repo.
 #[must_use]
+/// The candidates as JSON — the machine-readable plan to inspect before
+/// `--open` (and what a scheduler/operator consumes). Hand-rolled rather than
+/// derived: `Candidate` is wave-core's type and `VersionConstraint`/`RepoRef`
+/// aren't `Serialize`, and the wire shape here is a report, not those types.
+pub fn render_discovery_json(candidates: &[Candidate]) -> anyhow::Result<String> {
+    let items: Vec<serde_json::Value> = candidates
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "repo": repo_slug(&c.repo),
+                "host": c.repo.host,
+                "module": c.module,
+                "manifestPath": c.manifest_path,
+                "current": c.current.to_string(),
+                "latest": c.latest,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "candidateCount": items.len(),
+        "candidates": items,
+    });
+    Ok(serde_json::to_string_pretty(&doc)?)
+}
+
 pub fn render_discovery(candidates: &[Candidate]) -> String {
     if candidates.is_empty() {
         return "no external dependency updates found\n".to_string();
