@@ -88,3 +88,37 @@ affinity: {}
 
 # RUST_LOG for the wave binary.
 logLevel: info
+
+# ── operator ────────────────────────────────────────────────────────────
+# The wave-operator reconciles WaveCascade CRs (shipped in crds/) into run Jobs.
+# A WaveCascade is a NAMED, repeatable bump config — which repos, which modules
+# are first-party, report-or-open — driven on demand (annotate with
+# fastverk.savvifi.com/wave-now) and/or periodically (spec.schedule).
+#
+# It supersedes the untyped discover/reconcile CronJobs above for anything
+# CR-driven: it renders the SAME `wave discover …` argv, but adds a name, a
+# trigger, and a status. The CronJobs stay for the org-wide external scan, so the
+# two coexist while that migrates.
+#
+# Inert until a WaveCascade exists — enabling this reconciles nothing on its own.
+operator:
+  enabled: false
+  image:
+    # Go operator — a DIFFERENT image from the Rust wave CLI above (which it
+    # renders into run Jobs via WAVE_IMAGE).
+    repository: ghcr.io/fastverk/wave-operator
+    tag: ""
+    pullPolicy: IfNotPresent
+  serviceAccount:
+    annotations: {}
+  # PVC for the durable WaveStore, mounted into run Jobs. Empty ⇒ runs are
+  # stateless, which is correct for the flat bump path (it keeps no cross-run
+  # state) but not for a cascade. ReadWriteOnce/single-writer, which is why the
+  # operator enforces single-flight.
+  stateClaim: ""
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
