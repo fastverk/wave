@@ -126,6 +126,38 @@ crate.spec(
 crate.from_specs(name = "crates")
 use_repo(crate, "crates")
 
+# ─── Go operator (rules_go + gazelle) ──────────────────────────────
+# The wave-operator reconciles WaveCascade CRs into the Jobs that run the CLI
+# above. Go, not Rust, on purpose: the fleet is five-for-five Go/kubebuilder and
+# `kube` is pinned client-only across its Rust crates — Go owns the CRD schema,
+# other languages read CRs via the dynamic API (plugin-tbzl/src/buildrun.rs).
+# So the operator never links wave-core; it renders `wave discover …` argv.
+#
+# Versions match the fastverk platform + agents operators so the shared bzlmod
+# cache is reused. BUILD files under operator/ are gazelle-generated
+# (`bazel run //:gazelle`) with the prefix `github.com/fastverk/wave/operator`.
+#
+# NOTE: deliberately NO hermetic_cc_toolchain here, unlike the platform operator.
+# The operator is pure Go and this module builds clean without it; a global
+# register_toolchains() of the non-libc-aware zig toolchains also matches the
+# EXEC platform on linux, which reds protobuf's upb host tools unless paired with
+# `--no-gc-sections`. Only add zig if a build actually needs it, and add the
+# linkopts with it.
+bazel_dep(name = "rules_go", version = "0.60.0")
+bazel_dep(name = "gazelle", version = "0.51.0")
+
+# The hermetic Go SDK, pinned to the fleet's. operator/go.mod declares `go 1.26`
+# (a floor).
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.download(version = "1.26.4")
+
+go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+go_deps.from_file(go_mod = "//operator:go.mod")
+use_repo(go_deps, "io_k8s_api", "io_k8s_apimachinery", "io_k8s_client_go", "io_k8s_sigs_controller_runtime")
+
+# `use_repo(go_deps, ...)` — the external Go repos the operator's BUILD files
+# reference. Maintained by `bazel mod tidy`.
+
 # ─── OCI image (//wave:image) ──────────────────────────────────────
 # Bundle the wave binary into a distroless/cc image for the helm
 # CronJob (deploy/helm/wave). distroless/cc carries glibc + ca-certs,
@@ -151,6 +183,22 @@ use_repo(
     "distroless_cc",
     "distroless_cc_linux_amd64",
     "distroless_cc_linux_arm64_v8",
+)
+
+# The operator is a single PURE-static Go binary, so it needs no libc — static
+# rather than the cc base the Rust CLI uses. Same digest the fastverk platform
+# operator pins. amd64 only (EKS): the image rule therefore needs a linux/amd64
+# platform regardless of host — see `--config=operator-image` in .bazelrc.
+oci.pull(
+    name = "distroless_static",
+    digest = "sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639",  # tag: nonroot
+    image = "gcr.io/distroless/static-debian12",
+    platforms = ["linux/amd64"],
+)
+use_repo(
+    oci,
+    "distroless_static",
+    "distroless_static_linux_amd64",
 )
 
 # Dev-only.

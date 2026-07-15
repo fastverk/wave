@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "controller",
+    srcs = [
+        "job.go",
+        "wavecascade_controller.go",
+    ],
+    importpath = "github.com/fastverk/wave/operator/internal/controller",
+    visibility = ["//operator:__subpackages__"],
+    deps = [
+        "//operator/api/v1:api",
+        "@io_k8s_api//batch/v1:batch",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/types",
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+        "@io_k8s_sigs_controller_runtime//pkg/client",
+        "@io_k8s_sigs_controller_runtime//pkg/controller/controllerutil",
+        "@io_k8s_sigs_controller_runtime//pkg/log",
+    ],
+)
+
+go_test(
+    name = "controller_test",
+    srcs = ["job_test.go"],
+    embed = [":controller"],
+    deps = [
+        "//operator/api/v1:api",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+    ],
+)
