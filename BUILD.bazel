@@ -1,3 +1,19 @@
+# wave — the cross-repo dependency-cascade engine (Rust) + wave-operator (Go).
+#
+# `bazel run //:gazelle` (re)generates the operator's BUILD files from its Go
+# sources + go.mod. Scoped to `operator/` ONLY so it never rewrites the Rust
+# crates or the non-Go trees (deploy/helm, proto/). go_deps reads operator/go.mod
+# (bzlmod) and `bazel mod tidy` maintains the MODULE.bazel `use_repo`. The Go
+# import prefix is declared in operator/BUILD.bazel
+# (`# gazelle:prefix github.com/fastverk/wave/operator`).
+
+load("@gazelle//:def.bzl", "gazelle")
+
 package(default_visibility = ["//visibility:public"])
 
 exports_files(["MODULE.bazel"])
+
+gazelle(
+    name = "gazelle",
+    args = ["operator"],
+)

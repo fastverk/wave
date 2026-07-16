@@ -1,0 +1,8 @@
+# The Go import prefix for the operator tree. gazelle reads this to resolve
+# intra-module imports (//operator/api/v1, //operator/internal/controller) rather
+# than treating them as external repos.
+# gazelle:prefix github.com/fastverk/wave/operator
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["go.mod"])
