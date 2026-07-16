@@ -1,8 +1,12 @@
 # Default values for the wave chart.
 
 image:
-  repository: ghcr.io/fastverk/wave
-  # Defaults to the chart's appVersion when empty.
+  # The wave CLI image the run Jobs execute. ECR: this chart only ever deploys
+  # on the fastverk build plane. On a CI-built per-sha chart, `tbzl build --name`
+  # bakes this repository + `--tag` bakes image.tag=<sha>, so a write-back
+  # targetRevision bump auto-rolls it (the plugin-integrations model).
+  repository: 042825952740.dkr.ecr.us-east-1.amazonaws.com/wave
+  # Defaults to the chart's appVersion when empty; baked to <sha> by CI.
   tag: ""
   pullPolicy: IfNotPresent
 
@@ -33,8 +37,17 @@ forge:
 # across the groups below). Provide via an existing Secret; its value is
 # exported to the container as FORGE_TOKEN (wave's universal token env).
 token:
-  existingSecret: wave-forge-token
-  secretKey: token
+  # The fleet's per-group GitLab bot tokens (fastverk-agent-<group>, api scope),
+  # the same secret plugin-forge consumes. Key `aion` = group_195_bot_… with
+  # Owner on aion/* — so wave MRs are authored by the group bot, not a person,
+  # and rotation is decoupled from any individual. NOT wave-forge-token, which is
+  # read_api only and cannot open MRs.
+  #
+  # This wires ONE group. A WaveCascade over a different group (studio/infra)
+  # needs that group's key — resolving the key from spec.scope.group is the
+  # follow-up; today the operator injects whichever key is set here as FORGE_TOKEN.
+  existingSecret: forge-gitlab-group-tokens
+  secretKey: aion
 
 # Discovery: one CronJob per group scans for out-of-date external deps.
 discover:
@@ -104,9 +117,14 @@ logLevel: info
 operator:
   enabled: false
   image:
-    # Go operator — a DIFFERENT image from the Rust wave CLI above (which it
-    # renders into run Jobs via WAVE_IMAGE).
-    repository: ghcr.io/fastverk/wave-operator
+    # Go operator — a DIFFERENT image + ECR repo from the Rust wave CLI above
+    # (which it renders into run Jobs via WAVE_IMAGE). The build-runner derives
+    # this repo from the oci_push target NAME (`wave-operator-image_push` →
+    # `wave-operator`), so both images ride ONE BuildRun of the wave repo.
+    repository: 042825952740.dkr.ecr.us-east-1.amazonaws.com/wave-operator
+    # Empty ⇒ share the CLI image.tag (below): both images are built from the
+    # SAME wave repo sha, and CI bakes only the top-level image.tag=<sha>. So a
+    # per-sha chart tags the operator image correctly without a second bake.
     tag: ""
     pullPolicy: IfNotPresent
   serviceAccount:

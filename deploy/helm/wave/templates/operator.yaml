@@ -88,7 +88,9 @@ spec:
       {{- end }}
       containers:
         - name: operator
-          image: "{{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag | default .Chart.AppVersion }}"
+          # tag falls back to the CLI image.tag (which CI bakes to <sha>) so the
+          # operator image is tagged with the same repo sha without a second bake.
+          image: "{{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
           args:
             - --leader-elect
