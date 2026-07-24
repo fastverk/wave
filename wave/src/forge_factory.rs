@@ -47,13 +47,27 @@ pub fn token_for(kind: ForgeKind) -> Result<String> {
 }
 
 /// Build a forge adapter for `kind` on `host` with `token`.
+///
+/// The adapter is wrapped in [`forge::runtime::pin`], which runs its HTTP on a
+/// runtime the `forge` crate owns. That is not optional here: under Bazel `forge`
+/// resolves its own `crate_universe`, so its hyper links against **forge's**
+/// tokio while wave awaits on **wave's** — two reactor thread-locals, and the
+/// first DNS resolution panics
+///
+/// ```text
+/// there is no reactor running, must be called from the context of a Tokio 1.x runtime
+/// ```
+///
+/// on `main`, killing the process. That is why every `wave-discover-*` CronJob
+/// has failed on every run. See `forge::runtime` for the full account.
 pub fn build_forge(kind: ForgeKind, host: &str, token: &str) -> Result<Box<dyn Forge>> {
-    match kind {
-        ForgeKind::Github => Ok(Box::new(forge::github::GitHubForge::new(token.to_string())?)),
-        ForgeKind::Gitlab => Ok(Box::new(forge::gitlab::GitLabForge::new(
+    let inner: Box<dyn Forge> = match kind {
+        ForgeKind::Github => Box::new(forge::github::GitHubForge::new(token.to_string())?),
+        ForgeKind::Gitlab => Box::new(forge::gitlab::GitLabForge::new(
             host.to_string(),
             token.to_string(),
-        )?)),
+        )?),
         other => bail!("unsupported forge kind: {other:?}"),
-    }
+    };
+    Ok(Box::new(forge::runtime::pin_boxed(inner)))
 }

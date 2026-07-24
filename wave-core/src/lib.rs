@@ -102,6 +102,11 @@ pub fn to_forge_change(c: &pb::ChangeRef) -> forge::ChangeRef {
         number: c.number,
         url: c.url.clone(),
         branch: c.branch.clone(),
+        // forge gained `id` for forges that do not number their changes; wave's
+        // own stored ChangeRef predates it and is numeric-only. Empty is the
+        // documented "fall back to number" signal, so this is lossless for the
+        // two forges wave drives — not a placeholder to fill in later.
+        id: String::new(),
     }
 }
 

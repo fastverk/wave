@@ -708,6 +708,9 @@ mod tests {
                     number,
                     url: format!("https://forge/{}/-/merge_requests/{number}", repo.name),
                     branch: head.to_string(),
+                    // This mock stands in for a numbering forge, so empty `id`
+                    // is the correct "read `number`" signal, not a stub.
+                    id: String::new(),
                 },
                 already_existed: false,
             })
