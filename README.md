@@ -1,3 +1,19 @@
+> [!IMPORTANT]
+> **This repository is retired.** `wave` is developed in the
+> [`fastverk/platform`](https://github.com/fastverk/platform) ship vehicle, at
+> [`wave/`](https://github.com/fastverk/platform/tree/main/wave). Open issues and
+> pull requests there.
+>
+> The published module is unchanged — `bazel_dep(name = "wave", version = "0.1.0")`
+> resolves exactly as before. This remote keeps its full history and every tag, so
+> existing registry entries and `git_override` pins stay valid. The `wave.v1`
+> protos are published from
+> [`fastverk/contracts`](https://github.com/fastverk/contracts).
+>
+> Retired at [`c689d65`](https://github.com/fastverk/wave/commit/c689d650fe33e34507c42d3dcb65c56954454a07),
+> the commit the vehicle imported — nothing here is unimported. Background:
+> [Consolidation](https://docs.fastverk.com/consolidation.html).
+
 # wave
 
 Cross-repo dependency-cascade engine — *not* Renovate.
